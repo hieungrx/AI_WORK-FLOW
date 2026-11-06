@@ -1,252 +1,245 @@
-CODE_STATUS: REJECTED
+CODE_STATUS: APPROVED
 
 1. Kết luận Implementation Gate — Task 2
-CHƯA ĐỦ ĐIỀU KIỆN NGHIỆM THU
+IMPLEMENTATION GATE PASSED
 
-Mã nguồn src/todo.test.js được cung cấp cho thấy Worker đã triển khai phần lớn thiết kế v1.1, bao gồm các nhóm kiểm thử T1–T9, cơ chế cô lập filesystem, fault injection và runner self-verification.
+Sau khi đối chiếu CURRENT_PLAN.md v1.1 với toàn bộ mã nguồn src/todo.js, src/todo.test.js, git diff, git status --short và bằng chứng thực thi được cung cấp, Task 2 đạt yêu cầu nghiệm thu và được phép đánh dấu hoàn thành.
 
-Tuy nhiên, chưa thể phê duyệt Implementation Gate vì bản git diff đã bị cắt trước khi kết thúc file, chưa có kết quả thực thi kiểm thử và có thay đổi ngoài phạm vi Task 2 cần được kiểm tra.
+Các vấn đề dẫn tới quyết định REJECTED ở vòng review trước đã được khắc phục. Không phát hiện sai lệch hợp đồng hoặc lỗi logic nghiêm trọng đủ để chặn nghiệm thu trong phạm vi Task 2.
 
-Đây là quyết định dựa trên bằng chứng chưa đầy đủ, không phải kết luận rằng toàn bộ mã nguồn đã triển khai sai.
+Positive Tests
 
-Hạng mục
+22/22
+PASS theo log
 
-	
+Negative Path
 
-Đánh giá
+Exit 1
+Đúng kỳ vọng
 
+Blocking Issues
 
+0
+Trong phạm vi review
 
+Giới hạn xác minh: Tôi đã review mã nguồn và bằng chứng chạy kiểm thử trong thông tin bạn cung cấp, chưa thực thi trực tiếp trên repository Windows của Worker. Vì vậy, kết quả 22/22 PASS được xác nhận là phù hợp với log, không phải kết quả chạy độc lập của Mentor.
 
-Đối chiếu thiết kế v1.1
+2. Đối chiếu các tiêu chí nghiệm thu
 
-	
-
-Phần lớn nội dung nhìn thấy phù hợp
-
-
-
-
-Kiểm thử T1–T8
-
-	
-
-Đã thấy triển khai, chưa xác minh chạy thành công
-
-
-
-
-Runner self-verification T9
+Nhóm
 
 	
 
-Mới thấy một phần T9.1
+Kết quả review
 
 
 
 
-Exit code thực tế
-
-	
-
-Chưa có kết quả chạy
-
-
-
-
-Cleanup và file preservation
+T1 — CRUD, Filter, Exports
 
 	
 
-Có kiểm thử, chưa xác minh kết quả
+ Đạt
 
 
 
 
-Thay đổi ngoài Task 2
-
-	
-
-Cần rà soát
-
-
-
-
-Implementation Gate
+T2 — ID Reuse & Overflow
 
 	
 
-REJECTED
+ Đạt
 
-2. Các vấn đề cần khắc phục
-BLOCKER 01 — Không có toàn bộ mã nguồn để review
 
-Mức độ: CRITICAL
 
-Bản diff của src/todo.test.js dài 1.536 dòng nhưng dữ liệu gửi đến Mentor bị cắt tại T9.1:
+
+T3 — Schema & Data Preservation
+
+	
+
+ Đạt
+
+
+
+
+T4 — Idempotency
+
+	
+
+ Đạt
+
+
+
+
+T5 — Clock Rollback
+
+	
+
+ Đạt
+
+
+
+
+T6 — Strict ID Validation
+
+	
+
+ Đạt
+
+
+
+
+T7 — Import & CLI Isolation
+
+	
+
+ Đạt
+
+
+
+
+T8 — Safe Write & Cleanup
+
+	
+
+ Đạt
+
+
+
+
+T9 — Runner Self-Verification
+
+	
+
+ Đạt
+
+Đã xác nhận các điểm quan trọng: 13 exports đúng hợp đồng, không sử dụng framework kiểm thử bên ngoài, dữ liệu lỗi không bị ghi đè, mock được khôi phục trong finally, và nhánh kiểm thử thất bại có chủ đích trả exit code 1.
+
+3. Đánh giá các blocker từ vòng trước
+
+Blocker trước
+
+	
+
+Tình trạng hiện tại
+
+
+
+
+Diff bị cắt, thiếu mã nguồn
+
+	
+
+Đã cung cấp mã nguồn đầy đủ
+
+
+
+
+Thiếu verification evidence
+
+	
+
+Có positive và negative evidence
+
+
+
+
+ask_mentor.mjs làm biến dạng diff
+
+	
+
+Git status hiện chỉ còn Task 2
+
+
+
+
+Thay đổi ngoài phạm vi
+
+	
+
+Không xuất hiện trong Git status hiện tại
+
+
+
+
+Path containment chưa an toàn
+
+	
+
+Đã bổ sung isInsideDir()
+
+git status --short chỉ ghi nhận:
 
 Văn bản thuần túy
-... [ĐÃ CẮT BỚT DO VƯỢT QUÁ GIỚI HẠN AN TOÀN 40000 KÝ TỰ] ...
+A src/todo.test.js
 
-Do đó chưa thể xác nhận:
+Điều này phù hợp với phạm vi thay đổi được đề xuất cho Task 2.
 
-T9.1 có thực sự hoàn chỉnh.
+4. Lưu ý kỹ thuật không chặn nghiệm thu
 
-T9.2 có được triển khai chính xác.
+Có ba cải tiến nhỏ nên đưa vào Technical Debt thay vì yêu cầu thêm vòng sửa:
 
-Entry point của todo.test.js có gọi runTestSuite() đúng cách.
+Thứ nhất — Path containment: Hàm isInsideDir() nên phân biệt chính xác rel === '..' và rel.startsWith('..' + path.sep). Cách hiện tại có thể từ chối nhầm thư mục con bắt đầu bằng hai dấu chấm. Không ảnh hưởng đến các đường dẫn tạm đang sử dụng.
 
-Chế độ --simulate-runner-failure có được xử lý đúng.
+Thứ hai — Runner self-verification: T9.1 nên bổ sung assertion kiểm tra failures[0].stack, failures.length và passed + failed === total cho cả hai nhánh để bám sát hoàn toàn tiêu chí định lượng.
 
-File có lỗi cú pháp hoặc logic trong phần bị cắt hay không.
+Thứ ba — Fault injection: Bộ kiểm thử hiện xác minh lỗi ghi và đổi tên file bằng mock JavaScript. Điều này đáp ứng hợp đồng Task 2 nhưng không thay thế kiểm thử lỗi filesystem thực tế. Không nên mở rộng phạm vi ở checkpoint này.
 
-Yêu cầu sửa: Cung cấp toàn bộ src/todo.test.js và src/todo.js để Mentor kiểm tra trực tiếp, hoặc chia snapshot mã nguồn thành nhiều phần không bị cắt.
+Các lưu ý trên không làm thay đổi quyết định APPROVED.
 
-BLOCKER 02 — Chưa có bằng chứng thực thi kiểm thử
-
-Mức độ: HIGH
-
-Thiết kế yêu cầu xác minh cả positive path và negative path.
-
-Hiện tại chưa có log chứng minh:
-
-node src/todo.test.js hoàn thành với exit code 0.
-
-Tất cả test case PASS.
-
-node src/todo.test.js --simulate-runner-failure kết thúc với exit code 1.
-
-Không có file tạm còn sót.
-
-Không có tác động phụ lên dữ liệu dự án.
-
-Yêu cầu sửa: Worker phải chạy kiểm thử thực tế và gửi log đầy đủ, kèm exit code của cả hai chế độ.
-
-BLOCKER 03 — Thay đổi ask_mentor.mjs làm giảm chất lượng bằng chứng review
-
-Mức độ: HIGH
-
-Diff cho thấy:
-
-Diff
-- const MAX_DIFF_CHARS = 80_000;
-+ const MAX_DIFF_CHARS = 40_000;
-
-Đồng thời, truncateSafely() được sửa để loại bỏ khoảng trắng, gộp dòng và chuẩn hóa nội dung.
-
-Đây là vấn đề đáng chú ý vì diff mã nguồn cần giữ nguyên cấu trúc để review chính xác.
-
-Việc gộp dòng có thể làm mất khả năng nhận biết:
-
-Ranh giới câu lệnh.
-
-Cấu trúc comment.
-
-Vị trí thay đổi.
-
-Phần code bị thêm hoặc xóa.
-
-Ngữ cảnh phục vụ phân tích lỗi.
-
-Ngoài ra, buildMentorPrompt() đã đổi từ gửi toàn bộ kế hoạch sang truncateSafely(planContent, 16_000), khiến Mentor không chắc đang nhận đủ hợp đồng kỹ thuật.
-
-Yêu cầu sửa:
-
-Không biến đổi nội dung diff bằng cách gộp dòng trước khi review.
-
-Nếu vượt giới hạn, chia thành nhiều phần có đánh số và giữ nguyên nội dung.
-
-Đính kèm file mã nguồn đầy đủ hoặc cung cấp cơ chế đọc trực tiếp.
-
-Không sử dụng bản diff bị cắt để yêu cầu phê duyệt cuối cùng.
-
-BLOCKER 04 — Có thay đổi ngoài phạm vi chưa được review
-
-Mức độ: MEDIUM
-
-git status --short hiện có:
-
-Văn bản thuần túy
- M .agents/scripts/ask_mentor.mjs
- A src/todo.test.js
-?? start-system.bat
-
-Trong đó:
-
-src/todo.test.js: thuộc Task 2.
-
-.agents/scripts/ask_mentor.mjs: thay đổi công cụ review, cần đánh giá riêng.
-
-start-system.bat: file mới chưa được cung cấp nội dung.
-
-Không thể kết luận start-system.bat an toàn chỉ từ tên file.
-
-Yêu cầu sửa: Cung cấp nội dung file .bat và giải thích lý do thay đổi ask_mentor.mjs. Nếu hai thay đổi không thuộc Task 2, hãy tách chúng khỏi phạm vi nghiệm thu Task 2, không nhất thiết phải xóa.
-
-3. Nhận xét kỹ thuật đối với phần code đã nhìn thấy
-
-Các phần triển khai dưới đây về cơ bản phù hợp với thiết kế:
-
-withTempWorkspace() — Có xử lý độc lập lỗi test và lỗi cleanup, không âm thầm bỏ qua cleanup failure.
-
-captureCliExecution() — Khôi phục console và process.exitCode trong finally.
-
-runTestSuite() — Theo dõi total, executed, passed, failed, failures và exit code.
-
-T3.2 — Dùng Buffer.compare() để xác minh bảo toàn dữ liệu.
-
-T7.1 — Sử dụng tiến trình con để kiểm tra side effect khi import module.
-
-T8.3 — Đã bổ sung cả mô phỏng lỗi ghi ngay lập tức và ghi dở một phần.
-
-Có thêm hai điểm cần lưu ý khi hoàn thiện:
-
-Path containment: Trong T4.1, T8.2 và T8.3, sử dụng path.resolve(target).startsWith(tempDir) có thể nhận nhầm thư mục cùng tiền tố, ví dụ todo-test-abc và todo-test-abc-other. Nên sử dụng path.relative() hoặc kiểm tra ranh giới đường dẫn để xác định đúng thư mục con.
-
-Single-fault mutation: Trong T3.2, một số payload có thể vi phạm nhiều quy tắc nếu không kiểm soát dữ liệu nền. Worker cần bảo đảm từng mẫu chỉ gây ra lỗi dự kiến và không vô tình PASS vì một nguyên nhân khác.
-
-4. Chỉ thị sửa đổi cho Worker Antigravity
+5. Chỉ thị cuối cùng cho Worker Antigravity
 Viết
-MENTOR FEEDBACK — IMPLEMENTATION GATE
 
-CODE_STATUS: REJECTED
+CODE_STATUS: APPROVED
+
+MENTOR FEEDBACK — IMPLEMENTATION GATE
 
 Task: Task 2 — src/todo.test.js
 
-Quyết định: Chưa cho phép đánh dấu Task 2 hoàn thành. Lý do chính là thiếu bằng chứng review và kiểm chứng thực thi, không phải yêu cầu thiết kế lại toàn bộ.
+Decision: APPROVED — IMPLEMENTATION GATE PASSED
 
-REQUIRED ACTIONS
+Acceptance Summary
 
-Cung cấp toàn bộ mã nguồn src/todo.test.js và src/todo.js, không cắt nội dung.
+Design v1.1: COMPLIANT
 
-Chạy kiểm thử thực tế và báo cáo tổng số PASS/FAIL, exit code của positive path và negative path.
+Required test groups T1–T8: COVERED
 
-Điều chỉnh cơ chế thu thập diff trong ask_mentor.mjs để bảo toàn nguyên trạng nội dung mã nguồn, không gộp dòng hoặc cắt mất phần cần review.
+Runner self-verification T9: COVERED
 
-Rà soát thay đổi ngoài phạm vi Task 2, đặc biệt file start-system.bat.
+Export contract: 13/13
 
-Kiểm tra path containment và tính độc lập của các mẫu dữ liệu lỗi trong T3.2.
+Positive execution evidence: 22/22 PASS, exit code 0
 
-Gửi lại mã nguồn cùng verification evidence để Mentor thực hiện vòng Implementation Gate tiếp theo.
+Negative execution evidence: Expected failure, exit code 1
 
-CONSTRAINTS
+Git change scope: src/todo.test.js
 
-Không refactor todo.js ngoài phạm vi đã duyệt.
+Blocking findings: NONE
 
-Không cài thêm dependency kiểm thử.
+Authorized Actions
 
-Không thay đổi 13 exports hoặc 8 nhóm acceptance criteria.
+Đánh dấu Task 2 [x] trong .agents/state/ROADMAP.md.
 
-Không đánh dấu Task 2 [x] trong ROADMAP.md khi chưa được phê duyệt Implementation Gate.
+Cập nhật .agents/state/HANDOFF.md với kết quả nghiệm thu và bằng chứng kiểm thử.
 
-Không tự động chuyển sang Task 3.
+Đặt .agents/state/MENTOR_FEEDBACK.md về STATUS: PENDING sau khi đã ghi nhận quyết định APPROVED vào lịch sử/audit.
 
-Next: Resubmit Code Review sau khi bổ sung đầy đủ bằng chứng.
+Lưu các cải tiến không chặn nghiệm thu vào Technical Debt.
 
-5. Quyết định cuối cùng
+Chỉ chuyển sang bước tiếp theo theo đúng roadmap và quy trình RPIR.
 
-CODE_STATUS: REJECTED — Evidence Incomplete
+Constraints
 
-Task 2 hiện có nền tảng triển khai phù hợp với thiết kế v1.1, nhưng Mentor chưa có đủ căn cứ để xác nhận toàn bộ code an toàn và đáp ứng hợp đồng.
+Không tự ý refactor todo.js.
 
-Ưu tiên cao nhất: Sửa cơ chế gửi mã nguồn cho Mentor để tránh cắt hoặc biến dạng git diff, sau đó gửi lại toàn bộ code và kết quả chạy test. Không cần viết lại bộ kiểm thử từ đầu.
+Không mở rộng phạm vi Task 2.
+
+Không thay đổi hợp đồng kiến trúc v2.1.
+
+Không cần thêm vòng review Task 2 nếu không phát sinh thay đổi mã nguồn đáng kể.
+
+Final Decision: TASK 2 ACCEPTED.
+
+Kết luận: Task 2 đã vượt qua Implementation Gate dựa trên mã nguồn và verification evidence được cung cấp. Worker được phép hoàn tất checkpoint, cập nhật trạng thái dự án và tiếp tục quy trình RPIR theo roadmap đã phê duyệt.
+
+<!-- CODE_SHA256: 267272a2edb04c9508d60181917425d1da6d913d7b7bc8e9a6addebdda8f3944 | TASK: task-2 | TEST_EXIT: 0 -->
