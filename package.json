@@ -1,0 +1,16 @@
+{
+  "name": "ai-workflow",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "node src/todo.test.js",
+    "ask-mentor": "node .agents/scripts/ask_mentor.mjs"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "playwright-core": "^1.65.0"
+  }
+}
