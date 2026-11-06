@@ -1,0 +1,38 @@
+{
+  "strategy": {
+    "name": "Product Strategy & Scope Lead",
+    "description": "Phân tích phạm vi, chia nhỏ ROADMAP, chống scope creep"
+  },
+  "architect": {
+    "name": "Software System Architect",
+    "description": "Thiết kế kiến trúc hệ thống, data flow, module contracts"
+  },
+  "backend": {
+    "name": "Backend & Distributed Systems Engineer",
+    "description": "API, DB, bất đồng bộ, hiệu năng, fault-tolerance"
+  },
+  "frontend": {
+    "name": "Frontend Product Engineer",
+    "description": "UI components, state management, responsive, accessibility"
+  },
+  "workflow": {
+    "name": "AI Workflow & Prompt Engineer",
+    "description": "Tối ưu điều phối multi-agent, prompt, context engineering"
+  },
+  "qa": {
+    "name": "Independent QA & Gate Reviewer",
+    "description": "Kiểm định chéo git diff, test coverage, nghiệm thu Gate"
+  },
+  "devops": {
+    "name": "DevOps, Reliability & Cost Engineer",
+    "description": "CI/CD, bảo mật, cấu hình môi trường, tối ưu chi phí"
+  },
+  "creative": {
+    "name": "Creative Director & Experience Designer",
+    "description": "Định hướng thẩm mỹ, UX flow, micro-interactions"
+  },
+  "motion": {
+    "name": "Creative Motion & WebGL Engineer",
+    "description": "Animation, 3D/WebGL, shaders, tối ưu FPS/GPU"
+  }
+}

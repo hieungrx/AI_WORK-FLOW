@@ -1,6 +1,6 @@
 # AI_WORK-FLOW — Multi-Account Antigravity + ChatGPT Mentor Starter Template
 
-Bộ khung khởi tạo (**Starter Template**) tự động hóa quy trình phát triển phần mềm **RPIR (Research → Plan → Implement → Review Code)** kết hợp giữa **Worker Agent** (Antigravity / Gemini / Claude) và **ChatGPT Mentor** qua giao thức Chrome DevTools Protocol (CDP).
+Bộ khung khởi tạo (**Starter Template**) tự động hóa quy trình phát triển phần mềm **RPIR (Research → Plan → Implement → Review Code)** kết hợp giữa **Worker Agent** (Antigravity / Gemini / Claude) và **ChatGPT Mentor (9 Specialist Roles)** qua giao thức Chrome DevTools Protocol (CDP).
 
 ---
 
@@ -10,6 +10,10 @@ Bộ khung khởi tạo (**Starter Template**) tự động hóa quy trình phá
   - **Design Gate (`--mode plan`)**: Gửi `.agents/state/CURRENT_PLAN.md` cho ChatGPT Mentor duyệt trước khi cho phép sửa code trong `src/`.
   - **Implementation Gate (`--mode review-code`)**: Chỉ gửi kết quả chạy `npm test` + `git diff HEAD -- src/ tests/` (kèm danh sách/nội dung file mới trong `src/`, `tests/`). Tuyệt đối không gửi kèm code hạ tầng `.agents/`.
   - **Circuit Breaker (`--mode rescue`)**: Tự động gửi lỗi và diff cho Mentor gỡ bế tắc khi thử nghiệm thất bại quá 3 lần liên tiếp.
+- **Định tuyến 9 Chuyên gia (`Specialist Role Routing` — `.agents/roles.json` & `--role`)**:
+  - Hỗ trợ truyền `--role <role_key>` (1 hoặc kết hợp 2 vai trò cách nhau dấu phẩy, ví dụ `--role architect,backend`).
+  - Mặc định thông minh: `--mode plan` -> `architect`; `--mode review-code` -> `qa`; `--mode rescue` -> `architect,workflow`.
+  - Hỗ trợ tự động gắn Role Header vào đầu Prompt và tùy chọn `@mention` Custom GPT (`"useGptMention": true` trong `.agents/config.json`).
 - **Quản lý Luồng Chat theo Project & Giai đoạn (`SESSION_MAP.json`)**:
   - Tự động điều hướng vào thư mục Dự án trên ChatGPT (mặc định `AI-WORKSPACE`).
   - Xoay vòng luồng chat độc lập cho từng Task và từng giai đoạn (`task-1-plan`, `task-1-review`, `task-1-rescue`).
@@ -20,7 +24,23 @@ Bộ khung khởi tạo (**Starter Template**) tự động hóa quy trình phá
 
 ---
 
-## 2. Hướng dẫn Sử dụng làm Template cho Dự án Mới
+## 2. Danh bạ 9 Chuyên gia (`.agents/roles.json`)
+
+| Mã `--role` | Tên Chuyên gia / Custom GPT | Chuyên môn cốt lõi |
+| :--- | :--- | :--- |
+| `strategy` | **Product Strategy & Scope Lead** | Phân tích phạm vi, chia nhỏ ROADMAP, chống scope creep |
+| `architect` | **Software System Architect** | Thiết kế kiến trúc hệ thống, data flow, module contracts |
+| `backend` | **Backend & Distributed Systems Engineer** | API, DB, bất đồng bộ, hiệu năng, fault-tolerance |
+| `frontend` | **Frontend Product Engineer** | UI components, state management, responsive, accessibility |
+| `workflow` | **AI Workflow & Prompt Engineer** | Tối ưu điều phối multi-agent, prompt, context engineering |
+| `qa` | **Independent QA & Gate Reviewer** | Kiểm định chéo git diff, test coverage, nghiệm thu Gate |
+| `devops` | **DevOps, Reliability & Cost Engineer** | CI/CD, bảo mật, cấu hình môi trường, tối ưu chi phí |
+| `creative` | **Creative Director & Experience Designer** | Định hướng thẩm mỹ, UX flow, micro-interactions |
+| `motion` | **Creative Motion & WebGL Engineer** | Animation, 3D/WebGL, shaders, tối ưu FPS/GPU |
+
+---
+
+## 3. Hướng dẫn Sử dụng làm Template cho Dự án Mới
 
 ### Bước 1: Clone repo & Cài đặt dependencies
 ```bash
@@ -51,17 +71,24 @@ Mở Chrome với Remote Debugging port `9222` và đăng nhập sẵn vào `htt
 
 ---
 
-## 3. Các Lệnh Điều phối RPIR Thường Dùng
+## 4. Các Lệnh Điều phối RPIR Thường Dùng
 
-1. **Gửi Kế hoạch Thiết kế (`CURRENT_PLAN.md`) cho ChatGPT Mentor duyệt**:
+1. **Gửi Kế hoạch Thiết kế (`CURRENT_PLAN.md`) kèm định tuyến Chuyên gia phù hợp**:
    ```bash
-   node .agents/scripts/ask_mentor.mjs --mode plan --task task-1
+   # Task API / Backend:
+   node .agents/scripts/ask_mentor.mjs --mode plan --task task-1 --role architect,backend
+
+   # Task Giao diện UI/UX:
+   node .agents/scripts/ask_mentor.mjs --mode plan --task task-2 --role creative,frontend
+
+   # Task 3D / Animation:
+   node .agents/scripts/ask_mentor.mjs --mode plan --task task-3 --role motion
    ```
-2. **Gửi Review Code sau khi Implement và chạy pass `npm test`**:
+2. **Gửi Review Code sau khi Implement và chạy pass `npm test`** (mặc định định tuyến tới `qa`):
    ```bash
    node .agents/scripts/ask_mentor.mjs --mode review-code --task task-1
    ```
-3. **Kích hoạt Circuit Breaker khi gặp lỗi quá 3 lần liên tiếp**:
+3. **Kích hoạt Circuit Breaker khi gặp lỗi quá 3 lần liên tiếp** (mặc định định tuyến tới `architect,workflow`):
    ```bash
    node .agents/scripts/ask_mentor.mjs --mode rescue --task task-1 --error "Tóm tắt lỗi"
    ```
@@ -73,7 +100,7 @@ Mở Chrome với Remote Debugging port `9222` và đăng nhập sẵn vào `htt
 
 ---
 
-## 4. Tùy chỉnh Cấu hình (`.agents/config.json`)
+## 5. Tùy chỉnh Cấu hình (`.agents/config.json`)
 
 File `.agents/config.json` cho phép cấu hình nhanh thông số dự án:
 ```json
@@ -82,6 +109,7 @@ File `.agents/config.json` cho phép cấu hình nhanh thông số dự án:
   "cdpUrl": "http://127.0.0.1:9222",
   "sourceDirs": ["src", "tests"],
   "testCommand": "npm test",
-  "maxReviewRounds": 2
+  "maxReviewRounds": 2,
+  "useGptMention": false
 }
 ```

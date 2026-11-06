@@ -32,6 +32,7 @@ const MAX_ROUNDS_PER_STAGE =
   Number(WORKFLOW_CONFIG.maxReviewRounds) > 0 ? Number(WORKFLOW_CONFIG.maxReviewRounds) : 2;
 
 const STATE_DIR = path.join(REPO_ROOT, '.agents', 'state');
+const ROLES_FILE = path.join(REPO_ROOT, '.agents', 'roles.json');
 const PLAN_FILE = path.join(STATE_DIR, 'CURRENT_PLAN.md');
 const ROADMAP_FILE = path.join(STATE_DIR, 'ROADMAP.md');
 const HANDOFF_FILE = path.join(STATE_DIR, 'HANDOFF.md');
@@ -90,6 +91,7 @@ function normalizeTaskId(rawTask) {
 function parseArgs(argv) {
   let mode = DEFAULT_MODE;
   let taskArg = '';
+  let roleArg = '';
   let newThread = false;
   let errorSummary = '';
   let model = '';
@@ -108,6 +110,11 @@ function parseArgs(argv) {
       i += 1;
     } else if (arg.startsWith('--task=')) {
       taskArg = normalizeTaskId(arg.slice('--task='.length));
+    } else if (arg === '--role' && i + 1 < argv.length) {
+      roleArg = argv[i + 1].trim().toLowerCase();
+      i += 1;
+    } else if (arg.startsWith('--role=')) {
+      roleArg = arg.slice('--role='.length).trim().toLowerCase();
     } else if (arg === '--new-thread') {
       newThread = true;
     } else if (arg === '--error' && i + 1 < argv.length) {
@@ -142,12 +149,144 @@ function parseArgs(argv) {
   return {
     mode,
     taskArg,
+    roleArg,
     newThread,
     errorSummary,
     model,
     projectName,
     cdpUrl,
   };
+}
+
+/**
+ * Đọc danh bạ 9 Chuyên gia từ `.agents/roles.json`.
+ *
+ * @returns {Record<string, { name: string, description: string }>}
+ */
+function loadRolesCatalog() {
+  const defaults = {
+    strategy: {
+      name: 'Product Strategy & Scope Lead',
+      description: 'Phân tích phạm vi, chia nhỏ ROADMAP, chống scope creep',
+    },
+    architect: {
+      name: 'Software System Architect',
+      description: 'Thiết kế kiến trúc hệ thống, data flow, module contracts',
+    },
+    backend: {
+      name: 'Backend & Distributed Systems Engineer',
+      description: 'API, DB, bất đồng bộ, hiệu năng, fault-tolerance',
+    },
+    frontend: {
+      name: 'Frontend Product Engineer',
+      description: 'UI components, state management, responsive, accessibility',
+    },
+    workflow: {
+      name: 'AI Workflow & Prompt Engineer',
+      description: 'Tối ưu điều phối multi-agent, prompt, context engineering',
+    },
+    qa: {
+      name: 'Independent QA & Gate Reviewer',
+      description: 'Kiểm định chéo git diff, test coverage, nghiệm thu Gate',
+    },
+    devops: {
+      name: 'DevOps, Reliability & Cost Engineer',
+      description: 'CI/CD, bảo mật, cấu hình môi trường, tối ưu chi phí',
+    },
+    creative: {
+      name: 'Creative Director & Experience Designer',
+      description: 'Định hướng thẩm mỹ, UX flow, micro-interactions',
+    },
+    motion: {
+      name: 'Creative Motion & WebGL Engineer',
+      description: 'Animation, 3D/WebGL, shaders, tối ưu FPS/GPU',
+    },
+  };
+  try {
+    if (fs.existsSync(ROLES_FILE)) {
+      const parsed = JSON.parse(fs.readFileSync(ROLES_FILE, 'utf8'));
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return { ...defaults, ...parsed };
+      }
+    }
+  } catch (_err) {}
+  return defaults;
+}
+
+/**
+ * Giải quyết danh sách Chuyên gia (1 hoặc tối đa 2 vai trò) từ `--role` hoặc mặc định thông minh theo `--mode`:
+ * - `--mode plan`        -> mặc định `architect`
+ * - `--mode review-code` -> mặc định `qa` (Independent QA & Gate Reviewer)
+ * - `--mode rescue`      -> mặc định `architect,workflow`
+ *
+ * @param {string} roleArg
+ * @param {'plan' | 'review-code' | 'rescue'} mode
+ * @returns {Array<{ key: string, name: string, description: string }>}
+ */
+function resolveSpecialistRoles(roleArg, mode) {
+  const catalog = loadRolesCatalog();
+  let defaultKeys = ['architect'];
+  if (mode === 'review-code') {
+    defaultKeys = ['qa'];
+  } else if (mode === 'rescue') {
+    defaultKeys = ['architect', 'workflow'];
+  }
+
+  const rawKeys = roleArg
+    ? roleArg
+        .split(',')
+        .map((k) => k.trim().toLowerCase())
+        .filter(Boolean)
+    : defaultKeys;
+
+  const selected = [];
+  for (const key of rawKeys) {
+    if (catalog[key] && !selected.some((r) => r.key === key)) {
+      selected.push({
+        key,
+        name: catalog[key].name,
+        description: catalog[key].description,
+      });
+    }
+    if (selected.length >= 2) {
+      break;
+    }
+  }
+
+  if (selected.length === 0) {
+    for (const fallbackKey of defaultKeys) {
+      if (catalog[fallbackKey]) {
+        selected.push({
+          key,
+          name: catalog[fallbackKey].name,
+          description: catalog[fallbackKey].description,
+        });
+      }
+    }
+  }
+  return selected;
+}
+
+/**
+ * Tạo khối Role Header ngắn gọn gắn ở đầu Prompt để kích hoạt đúng chuyên môn của vai trò đã chọn.
+ *
+ * @param {Array<{ key: string, name: string, description: string }>} roles
+ * @returns {string}
+ */
+function buildRoleHeader(roles) {
+  if (!Array.isArray(roles) || roles.length === 0) {
+    return '';
+  }
+  const roleLines = roles.map(
+    (r) => `- [${r.key}] **${r.name}**: ${r.description}`
+  );
+  return [
+    '--- ĐỊNH TUYẾN CHUYÊN GIA (SPECIALIST ROLE ROUTING) ---',
+    'Vai trò chuyên gia kích hoạt cho phiên đánh giá này:',
+    ...roleLines,
+    'Hãy phân tích, phản biện và ra quyết định dưới góc nhìn chuyên sâu của (các) Chuyên gia trên.',
+    '--- KẾT THÚC ĐỊNH TUYẾN CHUYÊN GIA ---',
+  ].join('\n');
 }
 
 /**
@@ -549,7 +688,8 @@ function buildMentorPrompt(
   planContent,
   errorSummary,
   bootstrapBlock = '',
-  snapshot = null
+  snapshot = null,
+  selectedRoles = []
 ) {
   let corePrompt = '';
   const positiveTestExitCode = snapshot ? snapshot.positiveTestExitCode : 0;
@@ -618,9 +758,9 @@ function buildMentorPrompt(
     ].join('\n');
   }
 
-  const prompt = bootstrapBlock
-    ? `${bootstrapBlock}\n\n${corePrompt}`
-    : corePrompt;
+  const roleHeader = buildRoleHeader(selectedRoles);
+  const sections = [roleHeader, bootstrapBlock, corePrompt].filter(Boolean);
+  const prompt = sections.join('\n\n');
   return { prompt, positiveTestExitCode };
 }
 
@@ -803,6 +943,67 @@ async function waitForConversationUrl(
  * @param {string} text
  * @returns {Promise<void>}
  */
+/**
+ * Cơ chế kích hoạt Custom GPT / Plugin trên ChatGPT (`tryInvokeGptMention`):
+ * Nếu trong `.agents/config.json` có bật `"useGptMention": true`, thử gõ `@<Tên_Plugin>` vào ô chat,
+ * đợi 1000ms nếu có menu popup `[role="option"]` chứa tên Plugin thì nhấn `Enter` để chọn;
+ * nếu không có (do đang ở trong ChatGPT Project giới hạn `@mention`) thì tự động xóa chuỗi `@...` và đi tiếp, không báo lỗi.
+ *
+ * @param {import('playwright-core').Page} page
+ * @param {import('playwright-core').Locator} promptTextarea
+ * @param {Array<{ key: string, name: string, description: string }>} selectedRoles
+ * @returns {Promise<boolean>}
+ */
+async function tryInvokeGptMention(page, promptTextarea, selectedRoles) {
+  if (
+    !WORKFLOW_CONFIG.useGptMention ||
+    !Array.isArray(selectedRoles) ||
+    selectedRoles.length === 0
+  ) {
+    return false;
+  }
+
+  const pluginName = selectedRoles[0].name;
+  try {
+    await promptTextarea.click();
+    await page.keyboard.type(`@${pluginName}`, { delay: 15 });
+    await sleep(1000);
+
+    const popupOption = page
+      .locator('[role="option"], [role="menuitem"]')
+      .filter({ hasText: pluginName })
+      .first();
+
+    if (await popupOption.isVisible().catch(() => false)) {
+      await page.keyboard.press('Enter');
+      await sleep(300);
+      console.log(`[ROLE MENTION]: Đã kích hoạt "@${pluginName}" qua menu @mention.`);
+      return true;
+    }
+
+    // Nếu không có menu popup (ví dụ trong ChatGPT Project giới hạn @mention) -> xóa chuỗi @... và đi tiếp
+    await promptTextarea.evaluate((el) => {
+      el.focus();
+      el.replaceChildren(document.createElement('p'));
+      el.dispatchEvent(
+        new InputEvent('input', {
+          bubbles: true,
+          cancelable: true,
+          inputType: 'deleteContentBackward',
+        })
+      );
+    });
+    return false;
+  } catch (_err) {
+    await promptTextarea
+      .evaluate((el) => {
+        el.replaceChildren(document.createElement('p'));
+      })
+      .catch(() => {});
+    return false;
+  }
+}
+
 async function fillPromptFast(promptTextarea, text) {
   await promptTextarea.click();
   await promptTextarea.evaluate((el, rawText) => {
@@ -1270,8 +1471,17 @@ function detectApprovalStatus(feedbackText, mode = 'plan') {
 }
 
 async function main() {
-  const { mode, taskArg, newThread, errorSummary, model, projectName, cdpUrl } =
-    parseArgs(process.argv.slice(2));
+  const {
+    mode,
+    taskArg,
+    roleArg,
+    newThread,
+    errorSummary,
+    model,
+    projectName,
+    cdpUrl,
+  } = parseArgs(process.argv.slice(2));
+  const selectedRoles = resolveSpecialistRoles(roleArg, mode);
 
   // 1. Đọc nội dung file .agents/state/CURRENT_PLAN.md, ROADMAP.md, HANDOFF.md và SESSION_MAP.json
   if (!fs.existsSync(PLAN_FILE)) {
@@ -1332,11 +1542,13 @@ async function main() {
     planContent,
     errorSummary,
     bootstrapBlock,
-    reviewSnapshot
+    reviewSnapshot,
+    selectedRoles
   );
 
+  const roleSummary = selectedRoles.map((r) => `${r.key} (${r.name})`).join(', ');
   console.log(
-    `[PAYLOAD INFO]: Giai đoạn "${threadKey}" (Vòng ${nextRound}/${MAX_ROUNDS_PER_STAGE}) - Kích thước prompt: ${reviewPrompt.length} ký tự.`
+    `[PAYLOAD INFO]: Giai đoạn "${threadKey}" (Vòng ${nextRound}/${MAX_ROUNDS_PER_STAGE}) | Chuyên gia: [${roleSummary}] | Kích thước prompt: ${reviewPrompt.length} ký tự.`
   );
 
   // 2. Kết nối vào trình duyệt Chrome đang mở qua CDP port 9222
@@ -1407,6 +1619,7 @@ async function main() {
       }
     }
 
+    await tryInvokeGptMention(page, promptTextarea, selectedRoles);
     await fillPromptFast(promptTextarea, reviewPrompt);
 
     // Nhấn nút gửi ([data-testid="send-button"] hoặc button[aria-label="Gửi"])

@@ -6,5 +6,6 @@
     "tests"
   ],
   "testCommand": "npm test",
-  "maxReviewRounds": 2
+  "maxReviewRounds": 2,
+  "useGptMention": false
 }

@@ -28,10 +28,10 @@ Mọi Agent phải tuân thủ nghiêm ngặt quy trình RPIR khép kín đượ
 2. **Research**: Phân tích yêu cầu của task hiện tại trong `.agents/state/ROADMAP.md` và khảo sát codebase.
 3. **Plan & Auto-Mentor Review (`--mode plan`)**: Lập kế hoạch thiết kế chi tiết vào `.agents/state/CURRENT_PLAN.md`, đặt `.agents/state/MENTOR_FEEDBACK.md` ở trạng thái `STATUS: PENDING` và cập nhật `HANDOFF.md`. Sau khi viết xong `CURRENT_PLAN.md`, Agent **KHÔNG dừng lại chờ người dùng copy-paste thủ công nữa**, mà phải **tự động gọi lệnh**:
    ```bash
-   node .agents/scripts/ask_mentor.mjs --mode plan --task <task_id>
+   node .agents/scripts/ask_mentor.mjs --mode plan --task <task_id> --role <role_key>
    ```
    - Nếu kết quả trả về có **`STATUS: APPROVED`**: Script tự động khóa mã băm `planSha256` vào `.agents/state/STATE_LOCK.json` (kèm `<!-- PLAN_SHA256: <hash> | TASK: <task_id> -->` cuối `MENTOR_FEEDBACK.md`). Agent **tự động chuyển ngay sang bước 4 (Implement) trong cùng phiên chạy**.
-   - Nếu kết quả trả về có **`STATUS: REJECTED`**: Phân tích kỹ nhận xét trong `.agents/state/MENTOR_FEEDBACK.md`, cập nhật lại `.agents/state/CURRENT_PLAN.md` và gọi lại `node .agents/scripts/ask_mentor.mjs --mode plan --task <task_id>`.
+   - Nếu kết quả trả về có **`STATUS: REJECTED`**: Phân tích kỹ nhận xét trong `.agents/state/MENTOR_FEEDBACK.md`, cập nhật lại `.agents/state/CURRENT_PLAN.md` và gọi lại `node .agents/scripts/ask_mentor.mjs --mode plan --task <task_id> --role <role_key>`.
 4. **Implement**: Chỉ thực thi viết/sửa code trong `src/` sau khi `.agents/state/MENTOR_FEEDBACK.md` có `STATUS: APPROVED` và mã băm của `CURRENT_PLAN.md` khớp với `planSha256` trong `STATE_LOCK.json`:
    - **Quy tắc Circuit Breaker (`--mode rescue`)**: Nếu chạy test hoặc sửa lỗi thất bại quá **3 lần liên tiếp** ở bước Implement, Agent phải **dừng ngay việc tự thử nghiệm** và gọi lệnh:
      ```bash
@@ -46,6 +46,20 @@ Mọi Agent phải tuân thủ nghiêm ngặt quy trình RPIR khép kín đượ
    - Chỉ khi test pass (`testExitCode === 0`) và nhận được **`CODE_STATUS: APPROVED`** trong `.agents/state/CODE_REVIEW_FEEDBACK.md` (kèm khóa mã băm `codeSha256` vào `.agents/state/STATE_LOCK.json` và `<!-- CODE_SHA256: <hash> | TASK: <task_id> | TEST_EXIT: 0 -->`), Agent mới được phép đánh dấu hoàn thành `[x]` cho Task trong `.agents/state/ROADMAP.md`, commit code và đặt lại `.agents/state/MENTOR_FEEDBACK.md` về `STATUS: PENDING` cho task tiếp theo.
    - Nếu nhận được **`CODE_STATUS: REJECTED`**, Agent phải sửa code theo phản hồi trong `.agents/state/CODE_REVIEW_FEEDBACK.md`, chạy lại test và gọi lại `--mode review-code --task <task_id>`.
 6. **Handoff**: Cập nhật `.agents/state/HANDOFF.md` trước khi kết thúc phiên.
+
+### 2.4. Định tuyến Chuyên gia (Specialist Role Routing — `.agents/roles.json` & `--role`)
+Hệ thống tích hợp danh bạ 9 Chuyên gia trong `.agents/roles.json` (`strategy`, `architect`, `backend`, `frontend`, `workflow`, `qa`, `devops`, `creative`, `motion`). Khi gọi `ask_mentor.mjs`, Worker có thể truyền `--role <role_key>` (1 hoặc kết hợp tối đa 2 vai trò cách nhau dấu phẩy):
+- **Mặc định thông minh khi không truyền `--role`**:
+  - `--mode plan` -> mặc định dùng `architect` (*Software System Architect*).
+  - `--mode review-code` -> mặc định dùng `qa` (*Independent QA & Gate Reviewer*).
+  - `--mode rescue` -> mặc định dùng `architect,workflow`.
+- **Quy tắc chọn `--role` khi chạy `--mode plan`**: Worker tự động chọn `--role` phù hợp với bản chất của Task:
+  - Task thiết kế API, Database, xử lý bất đồng bộ/hiệu năng -> `--role architect,backend`
+  - Task xây dựng giao diện UI/UX, component, responsive -> `--role creative,frontend`
+  - Task hiệu ứng chuyển động, 3D/WebGL, shaders -> `--role motion` (hoặc `--role creative,motion`)
+  - Task CI/CD, Docker, bảo mật, hạ tầng -> `--role devops`
+  - Task phân tích phạm vi sản phẩm, chia nhỏ ROADMAP -> `--role strategy`
+- **Cơ chế kích hoạt**: Luôn gắn khối Role Header ở đầu Prompt, đồng thời nếu `.agents/config.json` bật `"useGptMention": true`, script sẽ tự động thử gõ `@<Tên_Plugin>` (`tryInvokeGptMention`) và fallback an toàn nếu đang ở trong ChatGPT Project giới hạn `@mention`.
 
 ## 3. Quy tắc Khóa An toàn & Bảo vệ Công cụ (Safety Gate & Tool Protection)
 - **Bảo vệ bộ công cụ điều phối**: *"Khi thực hiện các Task trong `ROADMAP.md`, Worker chỉ làm việc trên `src/`, `tests/` và `.agents/state/`. TUYỆT ĐỐI KHÔNG tự ý chỉnh sửa các script trong `.agents/scripts/`."*
