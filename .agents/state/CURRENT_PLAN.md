@@ -1,364 +1,288 @@
-# KẾ HOẠCH THIẾT KẾ CHI TIẾT (BẢN SỬA ĐỔI v1.1) — TASK 2: Bộ Kiểm thử Tự động `todo.test.js`
+# KẾ HOẠCH THIẾT KẾ CHI TIẾT (BẢN SỬA ĐỔI v1.4) — TASK 3: Giải Quyết Triệt Để 3 Mục Technical Debt (Path Containment, Runner Self-Verification & Real Filesystem Fault Injection)
 
-> **Trạng thái tài liệu**: Bản thiết kế kỹ thuật v1.1 cho Task 2 (`todo.test.js` trong thư mục mã nguồn), đã khắc phục triệt để **5 BLOCKER (01 -> 05)** và tích hợp toàn bộ **7 cải tiến kỹ thuật** từ đánh giá v1.0 của ChatGPT Mentor.
-> **Phạm vi**: Sử dụng 100% Node.js thuần (CommonJS: `assert/strict`, `fs`, `path`, `os`, `child_process`), không cài đặt bất kỳ thư viện kiểm thử bên ngoài nào, giữ nguyên 8 nhóm nghiệm thu, 13 thành phần export và không mở rộng phạm vi sang refactor `todo.js`.
-
----
-
-## 1. Mục tiêu & Phạm vi
-
-Xây dựng script kiểm thử tự động độc lập `todo.test.js` nhằm xác minh toàn diện tính đúng đắn, độ tin cậy và khả năng chống lỗi của module `todo.js` theo đúng hợp đồng kiến trúc v2.1:
-1. Kiểm tra đầy đủ **13 thành phần export** của `todo.js`:
-   `VALID_FILTERS`, `resolveStoragePath`, `isValidIsoTimestamp`, `parseTaskId`, `validateTaskList`, `loadTasks`, `saveTasks`, `addTask`, `listTasks`, `completeTask`, `removeTask`, `deleteTask`, `runCli`.
-2. Đảm bảo bao phủ trọn vẹn **8 nhóm kịch bản nghiệm thu bắt buộc** (Core CRUD & Filter, ID Reuse Contract, Corrupted JSON/Schema/Calendar Preservation, Idempotency, Clock-Rollback Consistency, Strict ID Validation, Storage & CLI Isolation, Safe Write Failure & Temp Cleanup).
-3. Tự kiểm chứng chính bộ điều phối kiểm thử (**Test Runner Self-Verification**) trên cả luồng thành công (`PASS`), luồng thất bại có chủ đích (`FAIL`), khôi phục mock khi test lỗi, và xử lý lỗi dọn dẹp (`Cleanup Failure`).
+> **Trạng thái tài liệu**: Bản thiết kế kỹ thuật v1.4 cho Task 3, giải quyết triệt để **2 BLOCKER về SHA-256 Manifest & Git Index Integrity** (bảo đảm tính bất biến giữa Approved Content, Git Index và Commit Content, xử lý trọn vẹn A/M/D/R và kiểm soát phạm vi toàn repository) và bảo toàn 100% các thiết kế kiểm thử kỹ thuật (T1.5, T9.1, FS-1 -> FS-5) cùng chính sách Single-Gate Commit đã được ChatGPT Mentor phê duyệt.
+> **Phạm vi**: 100% Node.js thuần (`assert/strict`, `fs`, `path`, `os`, `child_process`), không cài thư viện ngoài, bảo toàn tuyệt đối hợp đồng kiến trúc public API v2.1 của `src/todo.js` (13 exports).
 
 ---
 
-## 2. Kiến trúc Bộ Kiểm thử & Giải quyết Các Blocker Kiến trúc
+## 1. Đối Chiếu & Khắc Phục Các Điểm Chặn từ Vòng Review v1.3
 
-### 2.1. Chính sách Dọn dẹp An toàn & Bảo toàn Lỗi Gốc (`withTempWorkspace` — Khắc phục BLOCKER 04)
-- Tạo thư mục tạm riêng biệt cho từng test case bằng `fs.mkdtempSync(path.join(os.tmpdir(), 'todo-test-'))` và `filePath = path.join(tempDir, 'tasks.json')`.
-- **Không** gọi `fs.rmSync(tempDir, { recursive: true, force: true })` trần trong `finally` để tránh việc lỗi cleanup che khuất lỗi kiểm thử ban đầu hoặc bị bỏ qua âm thầm:
-  ```js
-  function withTempWorkspace(fn, rmSyncImpl = fs.rmSync) {
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'todo-test-'));
-    const filePath = path.join(tempDir, 'tasks.json');
-    let testError = null;
-    let result;
-
-    try {
-      result = fn({ tempDir, filePath });
-    } catch (err) {
-      testError = err;
-    }
-
-    let cleanupError = null;
-    try {
-      rmSyncImpl(tempDir, { recursive: true, force: true });
-      if (fs.existsSync(tempDir)) {
-        throw new Error(`Thư mục tạm vẫn còn tồn tại sau khi xóa: ${tempDir}`);
-      }
-    } catch (err) {
-      cleanupError = new Error(
-        `[Cleanup Failure tại ${tempDir}]: ${err && err.message ? err.message : String(err)}`
-      );
-    }
-
-    if (testError && cleanupError) {
-      // Bảo toàn lỗi gốc testError làm lỗi chính, đồng thời báo cáo rõ lỗi cleanup riêng biệt
-      testError.cleanupError = cleanupError;
-      testError.message = `${testError.message}\n  [Lỗi Cleanup kèm theo]: ${cleanupError.message}`;
-      throw testError;
-    }
-
-    if (testError) {
-      throw testError;
-    }
-
-    if (cleanupError) {
-      // Tuyệt đối không báo PASS nếu cleanup thất bại
-      throw cleanupError;
-    }
-
-    return result;
-  }
-  ```
-- **Đảm bảo 5 bất biến của BLOCKER 04**:
-  1. Bảo toàn lỗi gốc (`testError`) của test case.
-  2. Báo cáo lỗi cleanup riêng biệt (`[Lỗi Cleanup kèm theo]` hoặc `testError.cleanupError`).
-  3. Test runner bắt lỗi theo từng test case nên vẫn tiếp tục chạy các test còn lại.
-  4. Không bao giờ báo `[PASS]` nếu `cleanupError` xảy ra.
-  5. Không âm thầm bỏ qua bất kỳ lỗi dọn dẹp nào.
-
-### 2.2. Hợp đồng `process.exitCode` & Hàm Bắt Luồng CLI (`captureCliExecution` — Khắc phục BLOCKER 02)
-- **Xác định chính xác hợp đồng `todo.js` v2.1**:
-  - Đối chiếu trực tiếp với thiết kế `CURRENT_PLAN.md` v2.1 (Mục 5) và mã nguồn `todo.js` (dòng 428–510):
-    - **Chính hàm `runCli(args, filePath)` chịu trách nhiệm trực tiếp thiết lập `process.exitCode = 1` khi thất bại**:
-      - Khi thiếu lệnh (`args.length === 0`) hoặc rơi vào `catch (err)`: `runCli()` ghi thông báo lỗi qua `console.error(...)`, **trực tiếp gán `process.exitCode = 1`**, và trả về mã trạng thái `1`.
-      - Khi lệnh hợp lệ (`help`, `add`, `list`, `done`/`complete`, `remove`/`delete`): `runCli()` trả về mã trạng thái `0` và **không chạm vào `process.exitCode`** (giữ nguyên giá trị hiện có của `process.exitCode`).
-    - **Entry point `if (require.main === module)`**: Chỉ gọi `runCli(process.argv.slice(2))` và để tiến trình Node.js tự kết thúc với `process.exitCode` do `runCli()` đã thiết lập.
-- **Thiết kế `captureCliExecution(fn)` kiểm tra `process.exitCode` trước khi khôi phục**:
-  ```js
-  function captureCliExecution(fn) {
-    const prevLog = console.log;
-    const prevError = console.error;
-    const prevExitCode = process.exitCode;
-    const stdoutLines = [];
-    const stderrLines = [];
-
-    console.log = (...args) => stdoutLines.push(args.map(String).join(' '));
-    console.error = (...args) => stderrLines.push(args.map(String).join(' '));
-    process.exitCode = undefined;
-
-    let returnValue;
-    let exitCodeAfter;
-    try {
-      returnValue = fn();
-      // Ghi nhận process.exitCode ngay sau khi fn() chạy xong, TRƯỚC khi khôi phục
-      exitCodeAfter = process.exitCode;
-    } finally {
-      console.log = prevLog;
-      console.error = prevError;
-      process.exitCode = prevExitCode;
-    }
-
-    return {
-      returnValue,
-      exitCodeAfter,
-      stdoutLines,
-      stderrLines,
-      stdout: stdoutLines.join('\n'),
-      stderr: stderrLines.join('\n'),
-    };
-  }
-  ```
-
-### 2.3. Bộ Điều phối Kiểm thử & Bất biến Định lượng (`runTestSuite` — Khắc phục BLOCKER 05)
-- `runTestSuite(tests, options = { silent: false, setExitCode: true })`:
-  - Duyệt tuần tự qua toàn bộ mảng `tests` (`{ name, fn }`).
-  - Với mỗi test case:
-    - Tăng `executed += 1`.
-    - Thực thi `fn()` trong khối `try / catch (err)`.
-    - Nếu không lỗi: `passed += 1`, in `[PASS] ${name}` (nếu `!options.silent`).
-    - Nếu có lỗi: `failed += 1`, lưu `{ name, error: err, message: err.message, stack: err.stack }` vào mảng `failures`, in `[FAIL] ${name}: ${err.message}` ra `console.error` (nếu `!options.silent`).
-  - Sau vòng lặp, kiểm tra các bất biến định lượng bắt buộc bằng `assert.strictEqual`:
-    - `executed === tests.length` (số lượng test được đăng ký bằng đúng số lượng test đã chạy).
-    - `passed + failed === total` (với `total = tests.length`).
-  - Tính `suiteExitCode = failed > 0 ? 1 : 0`. Nếu `options.setExitCode === true` và `failed > 0`, đặt `process.exitCode = 1`.
-  - Trả về `{ total, executed, passed, failed, failures, exitCode: suiteExitCode }`.
+| Mục Hạng mục | Đánh giá từ v1.3 | Giải pháp khắc phục chuẩn hóa trong v1.4 (INTEGRITY CONTRACT) |
+| :--- | :--- | :--- |
+| **Checklist 1 & 2 (FS-3)** | **APPROVED** | Giữ nguyên 100% thiết kế kỹ thuật: File `tasks.json` ban đầu với 1 task, lưu `beforeBuffer`, gọi `saveTasks()` trên `0o555`, khôi phục quyền trong `finally`, so sánh `Buffer.compare === 0` và xác nhận 0 file `.tmp` rò rỉ. Kiểm chứng lỗi tạo/mở file tạm do quyền thư mục (lỗi ghi dở giữa chừng thuộc `T8.3`). |
+| **Checklist 3 (FS-4)** | **APPROVED** | Giữ nguyên 100% thiết kế kỹ thuật: Capability Probe độc lập kiểm tra rename đè file chỉ đọc; probe cho phép rename $\rightarrow$ SKIP có lý do; probe từ chối $\rightarrow$ chạy FS-4; probe hỗ trợ mà không ném lỗi $\rightarrow$ **bắt buộc ghi nhận FAIL, tuyệt đối không chuyển thành SKIP**; kiểm tra `err.syscall === 'rename'`. |
+| **Checklist 4 (Runner Metrics)** | **APPROVED** | Giữ nguyên hợp đồng runner: `assert.strictEqual(passed + failed + skipped, total);`, `assert.strictEqual(executed, total);`, `const exitCode = failed > 0 ? 1 : 0;`. Trong đó `executed` là số scenario được runner xử lý; `SKIP` không được tính vào `passed`. |
+| **Checklist 5 (No Pre-Approval Commit)** | **APPROVED** | Giữ nguyên chính sách Single-Gate Commit: `ask_mentor.mjs` thu thập toàn bộ thay đổi (staged, unstaged, untracked) thuộc phạm vi Task 3. Tuyệt đối không commit bất kỳ file nào trước khi nhận `CODE_STATUS: APPROVED`. |
+| **Checklist 6 — SHA-256 Manifest & Git Index Integrity** | **REJECTED (BLOCKER 01 & 02)** | **Bổ sung INTEGRITY CONTRACT — TASK 3**:<br>1) **Git Index Verification**: Pre-commit Guard đọc staged content thực tế (qua `git show :<path>`) và so sánh SHA-256 với Approved Manifest. Reject nếu khác hash, reject nếu partial staging / thiếu / thừa staged file. Đảm bảo bất biến: `Approved Content SHA-256 == Git Index Content SHA-256 == Expected Commit Content SHA-256`.<br>2) **Xử lý toàn diện trạng thái Git (A/M/D/R)**: Ghi nhận rõ file Added (A), Modified (M), Deleted (D - ghi nhận cờ xóa, không đọc nội dung), Renamed (R - ghi nhận đường dẫn cũ và mới).<br>3) **Repository Scope Verification**: Quét toàn bộ repository (`git status --porcelain=v1`). Phát hiện và CHẶN NGAY mọi thay đổi ngoài phạm vi Task 3 chưa được duyệt (chỉ cho phép các file trạng thái ngoại lệ hợp lệ đã định nghĩa). |
 
 ---
 
-## 3. Ma trận Các Kịch bản Kiểm thử Chi tiết (8 Nhóm Nghiệm thu)
+## 2. Kiến trúc & Thiết kế Chi tiết Từng Mục
 
-### Nhóm 1: Nghiệp vụ Cơ bản, Bộ lọc & Cấu hình Lưu trữ (`addTask`, `listTasks`, `removeTask`, `resolveStoragePath`)
-- **T1.1 — Kiểm tra tập hằng số và toàn bộ 13 exports**:
-  - Xác nhận `VALID_FILTERS` là `Set` có `size === 3`, chứa đúng `'all'`, `'pending'`, `'completed'`.
-  - Xác nhận `deleteTask === removeTask` và cả 13 thành phần export đều đúng kiểu hàm/đối tượng.
-- **T1.2 — Thứ tự ưu tiên của `resolveStoragePath()`**:
-  - Có `customPath` (kể cả có khoảng trắng `'  ./custom/tasks.json  '`) -> ưu tiên `path.resolve(customPath.trim())`.
-  - Không truyền `customPath` (hoặc truyền chuỗi rỗng `'   '`), có `process.env.TODO_FILE` -> ưu tiên `path.resolve(process.env.TODO_FILE.trim())`.
-  - Không có cả hai -> trả về `path.resolve(process.cwd(), 'tasks.json')`.
-  - Khôi phục `process.env.TODO_FILE` về trạng thái ban đầu trong `finally`.
-- **T1.3 — Chu trình CRUD cơ bản (`addTask`, `listTasks`, `completeTask`, `removeTask`)**:
-  - Khi file chưa tồn tại: `loadTasks(filePath)` và `listTasks('all', filePath)` trả về `[]` và **không** tạo file trên đĩa (`fs.existsSync(filePath) === false`).
-  - Thêm 2 task (`'  Viết báo cáo  '`, `'Họp nhóm'`): kiểm tra `title` được `.trim()`, `id` tăng `1, 2`, `completed: false`, `createdAt` chuẩn ISO 8601, `completedAt: null`.
-  - Kiểm tra `addTask` từ chối tiêu đề không hợp lệ (`''`, `'   \t\n '`, `null`, `undefined`, `123`), ném `Error` và giữ nguyên nội dung file trên đĩa (`Buffer.compare`).
-  - Đánh dấu hoàn thành task `#1`: kiểm tra `listTasks('all')` (2 phần tử), `listTasks()` mặc định (2 phần tử), `listTasks('pending')` (chỉ có `#2`), `listTasks('completed')` (chỉ có `#1`).
-  - Xóa task `#1` qua `removeTask(1, filePath)` và xóa task `#2` qua alias `deleteTask('2', filePath)`: kiểm tra giá trị trả về đúng là task vừa xóa và danh sách lưu trữ trở về `[]`.
-- **T1.4 — Kiểm tra bộ lọc không hợp lệ của `listTasks()`**:
-  - Truyền `'invalid'`, `'done'`, `''`, `null`, `123`, `{}` vào `listTasks(filter, filePath)` -> bắt buộc ném `Error` với thông báo chứa `'Bộ lọc không hợp lệ'`.
+### 2.1. Mục 1: Chuẩn hóa Path Containment (`isInsideDir` trong `src/todo.test.js`)
 
----
+#### 2.1.1. Công thức chuẩn hóa (Lexical Containment)
+```javascript
+function isInsideDir(targetPath, parentDir) {
+  if (typeof targetPath !== 'string' || typeof parentDir !== 'string') return false;
+  const resolvedParent = path.resolve(parentDir);
+  const resolvedTarget = path.resolve(targetPath);
+  const rel = path.relative(resolvedParent, resolvedTarget);
+  return rel !== '..' && !rel.startsWith('..' + path.sep) && !path.isAbsolute(rel);
+}
+```
 
-### Nhóm 2: Chiến lược Cấp phát & Tái sử dụng ID (`ID Strategy & Reuse Contract`)
-- **T2.1 — Xóa phần tử ở giữa danh sách (Không tái sử dụng ID bị khuyết ở giữa)**:
-  - Tạo 3 task có ID `[1, 2, 3]`, xóa task `#2` (`removeTask(2, filePath)`), danh sách còn `[1, 3]`.
-  - Gọi `addTask('Task mới sau khi xóa giữa', filePath)` -> xác minh task mới nhận `id === 4` (`max(1, 3) + 1`), không cấp trùng hay quay lại `2`.
-- **T2.2 — Xóa phần tử có ID lớn nhất ở cuối (Tái sử dụng ID lớn nhất vừa xóa)**:
-  - Từ danh sách đang có ID `[1, 3, 4]`, xóa `id = 4` (`removeTask(4, filePath)`), còn `[1, 3]`.
-  - Gọi `addTask('Task tái sử dụng maxId', filePath)` -> xác minh task mới nhận lại `id === 4` (`max(1, 3) + 1 = 4`).
-- **T2.3 — Xóa toàn bộ danh sách (Reset ID về `1`)**:
-  - Xóa hết các phần tử còn lại trong danh sách để file chứa `[]`.
-  - Gọi `addTask('Task khởi đầu lại', filePath)` -> xác minh task mới nhận `id === 1`.
-- **T2.4 — Chặn tràn số nguyên an toàn (`Number.MAX_SAFE_INTEGER`)**:
-  - Ghi trước vào file một task hợp lệ có `id: Number.MAX_SAFE_INTEGER`, lưu `beforeBuf = fs.readFileSync(filePath)`.
-  - Gọi `addTask('Tràn ID', filePath)` -> xác minh ném `Error('Không thể cấp phát ID mới: vượt quá giới hạn số nguyên an toàn')` và `Buffer.compare(fs.readFileSync(filePath), beforeBuf) === 0`.
+#### 2.1.2. Kịch bản kiểm thử chi tiết (`T1.5` trong `src/todo.test.js`)
+Sử dụng `path.join` từ thư mục cơ sở `baseDir = path.resolve(os.tmpdir(), 'todo-containment-check')`:
+1. Trùng chính thư mục: `isInsideDir(baseDir, baseDir) === true`.
+2. Thư mục con thông thường: `isInsideDir(path.join(baseDir, 'sub'), baseDir) === true`.
+3. File con lồng sâu: `isInsideDir(path.join(baseDir, 'sub', 'deep', 'tasks.json'), baseDir) === true`.
+4. Thư mục con có tên bắt đầu bằng `..`:
+   - `isInsideDir(path.join(baseDir, '..foo'), baseDir) === true`.
+   - `isInsideDir(path.join(baseDir, '..cache', 'tasks.json'), baseDir) === true`.
+   - `isInsideDir(path.join(baseDir, '...data'), baseDir) === true`.
+5. Đường dẫn có chứa `.` hoặc `..` nhưng sau khi chuẩn hóa vẫn nằm trong:
+   - `isInsideDir(path.join(baseDir, 'sub', '..', 'sub', 'file.json'), baseDir) === true`.
+6. Thư mục cha trực tiếp: `isInsideDir(path.resolve(baseDir, '..'), baseDir) === false`.
+7. Thư mục anh em: `isInsideDir(path.resolve(baseDir, '..', 'sibling'), baseDir) === false`.
+8. Khác ổ đĩa trên Windows (nếu có): ví dụ `C:\path` so với `D:\path` $\rightarrow$ `false`.
+9. Đầu vào không hợp lệ: `null`, `undefined`, số `123`, object `{}`, mảng `[]` $\rightarrow$ `false`.
 
 ---
 
-### Nhóm 3: Bảo vệ Dữ liệu khi JSON Hỏng, Sai Schema, Ngày Lịch Không Tồn tại hoặc Trùng ID
-- **T3.1 — Kiểm thử đơn vị hàm `isValidIsoTimestamp()` (Tích hợp cải tiến biên ngày/giờ/offset)**:
-  - **Chấp nhận**:
-    - UTC & mili/nano giây: `'2026-11-06T20:40:00.000Z'`, `'2026-11-06T20:40:00Z'`, `'2026-11-06T20:40:00.123456789Z'`, biên cuối ngày `'2026-12-31T23:59:59.999Z'`, biên đầu năm `'2026-01-01T00:00:00.000Z'`.
-    - Timezone offsets hợp lệ & biên: `'2026-11-06T20:40:00+07:00'`, `'2026-11-06T00:00:00+00:00'`, `'2026-06-15T12:30:00+23:59'`, `'2026-06-15T12:30:00-23:59'`, `'2026-04-30T23:59:59-05:30'`.
-    - Năm nhuận hợp lệ: `'2024-02-29T12:00:00.000Z'` (chia hết cho 4), `'2000-02-29T00:00:00.000Z'` (chia hết cho 400).
-  - **Từ chối**:
-    - Ngày lịch không tồn tại: `'2026-02-30T00:00:00.000Z'`, `'2025-02-29T00:00:00.000Z'` (năm thường), `'1900-02-29T00:00:00.000Z'` (năm thế kỷ không chia hết cho 400), `'2026-04-31T00:00:00.000Z'`, `'2026-06-31T00:00:00.000Z'`, `'2026-09-31T00:00:00.000Z'`, `'2026-11-31T00:00:00.000Z'`, `'2026-00-15T00:00:00.000Z'`, `'2026-13-01T00:00:00.000Z'`, `'2026-01-00T00:00:00.000Z'`, `'2026-01-32T00:00:00.000Z'`.
-    - Biên giờ/phút/giây/offset không hợp lệ: `'2026-11-06T24:00:00.000Z'`, `'2026-11-06T23:60:00.000Z'`, `'2026-11-06T23:59:60.000Z'`, `'2026-11-06T10:00:00+24:00'`, `'2026-11-06T10:00:00-24:00'`, `'2026-11-06T10:00:00+00:60'`, `'2026-11-06T10:00:00-05:60'`.
-    - Sai định dạng hoặc sai kiểu: `'2026-11-06'`, `'2026-11-06T20:40:00'` (thiếu Z/offset), `''`, `1700000000000`, `null`, `undefined`, `{}`, `new Date()`.
-- **T3.2 — Bảo toàn nguyên vẹn Byte-for-Byte (`Buffer.compare`) với các mẫu lỗi Đơn biến (`Single-Fault Mutation`)**:
-  - Định nghĩa hàm `createBaseValidTask(overrides = {})` trả về một đối tượng task chuẩn 100%, mỗi mẫu kiểm thử chỉ làm sai lệch **đúng 1 tiêu chí duy nhất**:
-    1. File rỗng (`''` và `'   \n\t '`).
-    2. JSON hỏng cú pháp (`'[{"id":1,"title":"Broken"'`).
-    3. Gốc JSON không phải mảng (`'{"id":1}'`).
-    4. Phần tử mảng không phải plain object (`'[null]'`, `'[[1]]'`, `'["str"]'`).
-    5. Chỉ sai `id` (`id: 0`, `id: -1`, `id: 1.5`, `id: "1"`).
-    6. Chỉ trùng `id` (2 task hợp lệ nhưng cùng `id: 1`).
-    7. Chỉ sai `title` (`title: ""`, `title: "   "`, `title: 123`).
-    8. Chỉ sai `completed` (`completed: "false"`, `completed: 0`, `completed: null`).
-    9. Chỉ sai `createdAt` (`createdAt: "2026-02-30T00:00:00.000Z"`).
-    10. Chỉ sai `completedAt` khi `completed: false` (`completedAt: "2026-11-06T20:40:00.000Z"` thay vì `null`).
-    11. Chỉ sai `completedAt` khi `completed: true` (`completedAt: null` hoặc `"2026-02-30T00:00:00.000Z"`).
-    12. Chỉ vi phạm thứ tự thời gian `completedAt < createdAt` (`createdAt: "2026-11-06T20:40:00.000Z"`, `completed: true`, `completedAt: "2026-11-06T20:39:59.999Z"`).
-  - Với từng mẫu lỗi:
-    - Lưu `const beforeBuffer = fs.readFileSync(filePath)`.
-    - Xác minh `loadTasks(filePath)`, `listTasks('all', filePath)`, `addTask('New', filePath)`, `completeTask(1, filePath)`, `removeTask(1, filePath)` đều ném `Error`.
-    - Xác minh `Buffer.compare(fs.readFileSync(filePath), beforeBuffer) === 0` (bảo toàn tuyệt đối byte-for-byte trên đĩa).
+### 2.2. Mục 2: Bổ sung Assertion Định lượng cho Runner Self-Verification (`T9.1` trong `src/todo.test.js`)
+
+Cập nhật `T9.1` đảm bảo kiểm tra định lượng đầy đủ theo đúng góp ý của Mentor:
+
+#### 2.2.1. Nhánh thành công (`passSuite`)
+```javascript
+assert.strictEqual(passSuite.total, 2);
+assert.strictEqual(passSuite.executed, 2);
+assert.strictEqual(passSuite.passed, 2);
+assert.strictEqual(passSuite.failed, 0);
+assert.strictEqual(passSuite.exitCode, 0);
+assert.strictEqual(Array.isArray(passSuite.failures), true);
+assert.strictEqual(passSuite.failures.length, 0);
+assert.strictEqual(passSuite.passed + passSuite.failed, passSuite.total);
+```
+
+#### 2.2.2. Nhánh thất bại có chủ đích (`failSuite`)
+```javascript
+assert.strictEqual(failSuite.total, 3);
+assert.strictEqual(failSuite.executed, 3);
+assert.strictEqual(failSuite.passed, 2);
+assert.strictEqual(failSuite.failed, 1);
+assert.strictEqual(failSuite.exitCode, 1);
+assert.strictEqual(failSuite.passed + failSuite.failed, failSuite.total);
+assert.strictEqual(failSuite.failures.length, 1);
+assert.strictEqual(failSuite.failures[0].name, 'Step 2 Intentional Fail');
+assert.strictEqual(failSuite.failures[0].message, 'Intentional assertion failure for runner check');
+assert.strictEqual(typeof failSuite.failures[0].stack, 'string');
+assert.ok(failSuite.failures[0].stack.includes('Intentional assertion failure for runner check'));
+assert.strictEqual(mockFlag, 'restored');
+```
+
+#### 2.2.3. Nhánh kiểm thử tiến trình con (`childProcess.spawnSync`)
+```javascript
+assert.strictEqual(childRes.error, undefined);
+assert.strictEqual(childRes.signal, null);
+assert.strictEqual(childRes.status, 1);
+assert.ok(childRes.stderr.includes('[FAIL] Simulated Failing Test'));
+assert.ok(childRes.stdout.includes('=== TỔNG KẾT: 1/2 PASS | 1/2 FAIL (Executed: 2) ==='));
+```
 
 ---
 
-### Nhóm 4: Tính Lũy đẳng (`Idempotency`) của `completeTask()` (Khắc phục BLOCKER 03)
-- **T4.1 — Hoàn thành lần thứ hai không đổi `completedAt`, không thay đổi `Buffer` file và không chạm vào bất kỳ thao tác ghi đĩa nào**:
-  1. Tạo task mới (`task = addTask('Kiểm tra idempotent', filePath)`) và gọi hoàn thành lần 1 (`firstDone = completeTask(task.id, filePath)`).
-  2. Xác nhận `firstDone.completed === true` và `isValidIsoTimestamp(firstDone.completedAt) === true`.
-  3. Lưu nguyên vẹn nội dung file dưới dạng `Buffer`: `const beforeBuffer = fs.readFileSync(filePath)`.
-  4. Cài đặt bộ chặn có kiểm soát (controlled write-path spy/guard) cho toàn bộ các thao tác ghi thuộc hợp đồng `saveTasks` (`fs.writeFileSync`, `fs.renameSync`, `fs.unlinkSync`, `fs.mkdirSync`, `fs.appendFileSync`, `fs.openSync`):
-     - Nếu bất kỳ hàm nào trong số này được gọi với đường dẫn nằm trong `tempDir` (hoặc `filePath`): tăng `writeAttemptCount += 1` và ném lỗi `new Error('Vi phạm Idempotency: completeTask lần 2 không được ghi đĩa')`.
-  5. Trong khối `try`:
-     - Gọi `const secondDone = completeTask(task.id, filePath)`.
-  6. Trong khối `finally`:
-     - Khôi phục toàn bộ các hàm `fs.*` về trạng thái gốc.
-  7. Xác minh:
-     - `writeAttemptCount === 0` (chứng minh đường ghi thực tế hoàn toàn không được gọi).
-     - `secondDone.completed === true` và `secondDone.completedAt === firstDone.completedAt`.
-     - `Buffer.compare(fs.readFileSync(filePath), beforeBuffer) === 0` và `fs.readdirSync(tempDir)` chỉ chứa duy nhất `'tasks.json'`.
+### 2.3. Mục 3: Bộ Kiểm thử Lỗi Filesystem Thực tế Độc lập (`tests/fs_fault.test.js`)
+
+Bộ kiểm thử chạy độc lập, tự quản lý runner mini với hợp đồng bất biến:
+- `assert.strictEqual(passed + failed + skipped, total);`
+- `assert.strictEqual(executed, total);`
+- `const exitCode = failed > 0 ? 1 : 0;`
+- Báo cáo rõ danh sách các bài test `PASS`, `FAIL`, và `SKIP` (kèm nguyên nhân kỹ thuật cụ thể).
+- Tuân thủ 100% nguyên tắc Isolation: mỗi kịch bản chạy trong một `tempDir = fs.mkdtempSync(...)` riêng, dọn dẹp tài nguyên (quyền file, thư mục) an toàn trong `finally`.
+
+#### Ma trận 5 Kịch bản Kiểm thử Lỗi Thực tế (Không Mock)
+
+```
++-----------------------------------------------------------------------------------+
+| Giai đoạn 1: Trước khi ghi tạm (Pre-write / mkdirSync)                             |
+| -> Kịch bản FS-2: Thành phần cha trong đường dẫn là một file thường              |
++-----------------------------------------------------------------------------------+
+                                          |
+                                          v
++-----------------------------------------------------------------------------------+
+| Giai đoạn 2: Trong khi ghi file tạm (Temp-write / writeFileSync)                  |
+| -> Kịch bản FS-3: Thư mục cha không có quyền ghi (POSIX 0555 / Read-only dir)     |
++-----------------------------------------------------------------------------------+
+                                          |
+                                          v
++-----------------------------------------------------------------------------------+
+| Giai đoạn 3: Khi thay thế nguyên tử (Atomic Replace / renameSync)                 |
+| -> Kịch bản FS-1: Đường dẫn đích là một thư mục đang tồn tại                     |
+| -> Kịch bản FS-4: File đích bị đặt thuộc tính Read-Only trên Windows NTFS         |
++-----------------------------------------------------------------------------------+
+                                          |
+                                          v
++-----------------------------------------------------------------------------------+
+| Baseline Verification: Tính toàn vẹn End-to-End trên ổ đĩa vật lý                 |
+| -> Kịch bản FS-5: Chu trình CRUD thực tế, kiểm tra không rò rỉ file .tmp          |
++-----------------------------------------------------------------------------------+
+```
+
+#### Chi tiết Kịch bản FS-1: Lỗi giai đoạn `renameSync()` khi đích là thư mục
+- **Call flow**: Gọi trực tiếp hàm xuất bản `saveTasks(sampleTasks, existingDirPath)`.
+  1. `validateTaskList()` hợp lệ.
+  2. `targetPath = resolveStoragePath(existingDirPath)`. `dir = path.dirname(targetPath)` (thư mục cha `tempDir`).
+  3. `tempPath` được tạo dưới dạng `.${basename}.${pid}.${timestamp}-${rand}.tmp`.
+  4. `fs.writeFileSync(tempPath, payload, 'utf8')` thực hiện thành công trên đĩa.
+  5. `fs.renameSync(tempPath, existingDirPath)` bị hệ điều hành từ chối thật: ném mã lỗi `EPERM` (Windows) hoặc `EISDIR` (POSIX).
+  6. Khối `catch (err)` phát hiện `fs.existsSync(tempPath) === true` và gọi `fs.unlinkSync(tempPath)`.
+  7. Lỗi được rethrow ra ngoài.
+- **Tiêu chí nghiệm thu**:
+  - Lỗi ném ra có `err.code === 'EPERM' || err.code === 'EISDIR'`.
+  - Nếu có `err.syscall`: `assert.strictEqual(err.syscall, 'rename')` (chứng minh lỗi xảy ra ở bước rename, không phải trước đó).
+  - `fs.statSync(existingDirPath).isDirectory() === true`.
+  - Thư mục cha `tempDir` không còn sót bất kỳ file `.tmp` nào (`entries.filter(e => e.endsWith('.tmp')).length === 0`).
+
+#### Chi tiết Kịch bản FS-2: Lỗi giai đoạn trước khi ghi tạm (`mkdirSync`)
+- **Setup**: Tạo file thường `const parentFile = path.join(tempDir, 'plain_file.txt'); fs.writeFileSync(parentFile, 'sentinel data', 'utf8'); const beforeBuffer = fs.readFileSync(parentFile);`.
+- **Call flow**: Gọi `saveTasks(sampleTasks, path.join(parentFile, 'tasks.json'))`.
+  1. `path.dirname(targetPath)` là `parentFile`.
+  2. `fs.mkdirSync(parentFile, { recursive: true })` thất bại ngay lập tức: ném `ENOTDIR` (POSIX) hoặc `EEXIST` (Windows).
+- **Tiêu chí nghiệm thu**:
+  - Lỗi ném ra có `err.code === 'ENOTDIR' || err.code === 'EEXIST'`.
+  - File `parentFile` được bảo toàn nguyên vẹn 100% từng byte (`Buffer.compare(beforeBuffer, fs.readFileSync(parentFile)) === 0`).
+  - Hoàn toàn không có file `.tmp` nào được tạo ra trên đĩa.
+
+#### Chi tiết Kịch bản FS-3: Lỗi giai đoạn ghi file tạm (`writeFileSync` trên thư mục không có quyền ghi)
+- **Capability Probe thực tế**:
+  - Tạo `probeDir = path.join(tempDir, 'probe_dir')`, `fs.mkdirSync(probeDir)`, `fs.chmodSync(probeDir, 0o555)`.
+  - Thử ghi `probe_file.tmp` vào `probeDir`.
+  - Nếu việc ghi thành công (chạy dưới quyền root trên POSIX hoặc Windows NTFS bỏ qua bit 0555): khôi phục quyền `0o755`, xóa probe và ghi nhận `SKIP` cho FS-3 kèm lý do: `"Môi trường không áp dụng giới hạn quyền ghi trên thư mục 0555 (Windows NTFS hoặc POSIX root)"`.
+  - Nếu việc ghi thất bại với `EACCES` hoặc `EPERM`: Capability được xác nhận! Tiến hành chạy test FS-3.
+- **FS-3 Setup & Execution**:
+  - Tạo thư mục `noWriteDir = path.join(tempDir, 'no_write'); fs.mkdirSync(noWriteDir);`.
+  - Tạo trước file `tasks.json` hợp lệ với 1 task, lưu `beforeBuffer = fs.readFileSync(filePath)`.
+  - Đổi quyền thư mục cha sang `0o555`: `fs.chmodSync(noWriteDir, 0o555);`.
+  - Gọi `saveTasks(sampleTasks, filePath)`.
+  - Bắt lỗi: xác nhận ném `EACCES` hoặc `EPERM`.
+- **Tiêu chí nghiệm thu**:
+  - Trong `finally`: khôi phục `fs.chmodSync(noWriteDir, 0o755)`.
+  - Đọc lại `filePath` và xác minh bảo toàn nguyên vẹn từng byte: `assert.strictEqual(Buffer.compare(beforeBuffer, fs.readFileSync(filePath)), 0)`.
+  - Xác nhận 0 file `.tmp` dở dang bị bỏ lại: `assert.strictEqual(fs.readdirSync(noWriteDir).filter(f => f.endsWith('.tmp')).length, 0)`.
+  - **Giới hạn kiểm thử**: FS-3 kiểm chứng lỗi không thể mở/tạo file tạm do quyền thư mục, không mô phỏng lỗi ghi dở giữa chừng (vốn đã được kiểm chứng riêng ở `T8.3` bằng scoped mock).
+
+#### Chi tiết Kịch bản FS-4: Lỗi giai đoạn `renameSync()` với file chỉ đọc trên Windows NTFS
+- **Capability Probe độc lập**:
+  - Tạo 2 file thử nghiệm độc lập: `probe_dst.txt` (ghi dữ liệu, `chmodSync 0o444`), và `probe_src.tmp` (ghi dữ liệu).
+  - Thử `fs.renameSync(probe_src.tmp, probe_dst.txt)`.
+  - Nếu thành công (như trên POSIX nơi rename đè lên file chỉ đọc): khôi phục `chmodSync 0o666`, dọn dẹp probe và ghi nhận `SKIP` cho FS-4 kèm lý do: `"Filesystem cho phép rename thay thế file read-only nếu thư mục cha có quyền ghi (hành vi chuẩn POSIX)"`.
+  - Nếu thất bại với `EPERM` hoặc `EACCES`: Capability được xác nhận! Tiến hành chạy test FS-4.
+- **FS-4 Setup & Execution**:
+  - Tạo `tasks.json` ban đầu với 1 task hợp lệ, lưu `beforeBuffer = fs.readFileSync(filePath)`.
+  - Đặt `fs.chmodSync(filePath, 0o444)`.
+  - Gọi `saveTasks(updatedTasks, filePath)`.
+  - Xử lý kết quả:
+    - Nếu `saveTasks()` KHÔNG ném lỗi hoặc làm sai lệch file: **ghi nhận FAIL, tuyệt đối không chuyển thành SKIP** (vì capability probe đã xác nhận hệ điều hành có chặn).
+    - Khi bắt được lỗi:
+      - `assert.ok(err.code === 'EPERM' || err.code === 'EACCES')`.
+      - Nếu có `err.syscall`: `assert.strictEqual(err.syscall, 'rename')`.
+- **Tiêu chí nghiệm thu**:
+  - Trong `finally`: khôi phục `fs.chmodSync(filePath, 0o666)`.
+  - So sánh byte-for-byte: `assert.strictEqual(Buffer.compare(beforeBuffer, fs.readFileSync(filePath)), 0)`.
+  - Dọn sạch file tạm: `assert.strictEqual(fs.readdirSync(tempDir).filter(f => f.endsWith('.tmp')).length, 0)`.
+
+#### Chi tiết Kịch bản FS-5: Kiểm chứng toàn vẹn End-to-End không rò rỉ file tạm trên đĩa thật
+- **Call flow**: Chạy chuỗi thao tác CRUD hoàn chỉnh trên đĩa thật: `saveTasks` $\rightarrow$ `loadTasks` $\rightarrow$ `addTask` $\rightarrow$ `completeTask` $\rightarrow$ `removeTask`.
+- **Tiêu chí nghiệm thu**:
+  - Sau mỗi thao tác, kiểm tra chi tiết dữ liệu trong `tasks.json` (`id`, `title`, `completed`, `completedAt`).
+  - Sau mỗi thao tác, kiểm tra `fs.readdirSync(tempDir).filter(f => f.endsWith('.tmp')).length === 0`.
+  - Dữ liệu `tasks.json` lưu đúng chuẩn JSON, có ký tự xuống dòng `\n` ở cuối, các trường dữ liệu hợp lệ 100%.
 
 ---
 
-### Nhóm 5: Kịch bản Đồng hồ Hệ thống bị Lùi (`Clock-Rollback Consistency`)
-- **T5.1 — Đánh dấu hoàn thành khi `Date.now()` nhỏ hơn `Date.parse(task.createdAt)`**:
-  - Tạo một task mới (`task = addTask('Kiểm tra lùi đồng hồ', filePath)`).
-  - Lưu `const originalDateNow = Date.now`.
-  - Trong khối `try`:
-    - Giả lập đồng hồ hệ thống bị điều chỉnh lùi 60 giây về trước thời điểm tạo task:
-      ```js
-      const rolledBackMs = Date.parse(task.createdAt) - 60_000;
-      Date.now = () => rolledBackMs;
-      ```
-    - Gọi `const completedTask = completeTask(task.id, filePath)`.
-    - Xác minh:
-      1. Hàm thực thi thành công, không bị `validateTaskList()` ném lỗi.
-      2. `completedTask.completed === true`.
-      3. `completedTask.completedAt === task.createdAt` (`Date.parse(completedTask.completedAt) >= Date.parse(task.createdAt)`).
-      4. Đọc lại từ đĩa qua `const reloaded = loadTasks(filePath)` thành công 100% và `reloaded[0].completedAt === task.createdAt`.
-  - Trong khối `finally`:
-    - Khôi phục `Date.now = originalDateNow`.
+## 3. Cập nhật Cấu hình & Tích hợp Bộ Kiểm thử
+
+### 3.1. Cập nhật `package.json`
+```json
+"scripts": {
+  "test": "node src/todo.test.js && node tests/fs_fault.test.js",
+  "ask-mentor": "node .agents/scripts/ask_mentor.mjs"
+}
+```
+
+### 3.2. Cập nhật `.agents/scripts/ask_mentor.mjs` & Hợp đồng Toàn vẹn (INTEGRITY CONTRACT — TASK 3)
+
+Để loại bỏ triệt để nguy cơ sai lệch giữa nội dung được phê duyệt, dữ liệu trong Git Index và nội dung commit thực tế, hệ thống áp dụng hợp đồng kiểm soát toàn vẹn 5 điểm:
+
+```
++-----------------------------------------------------------------------------------+
+|                           INTEGRITY CONTRACT — TASK 3                             |
++-----------------------------------------------------------------------------------+
+| 1. Approved Manifest:                                                             |
+|    - Đường dẫn file (chuẩn hóa đường dẫn tương đối từ repo root).                |
+|    - Trạng thái Git (Added: 'A', Modified: 'M', Deleted: 'D', Renamed: 'R').       |
+|    - SHA-256 của nội dung được Mentor duyệt (chuẩn hóa \r\n -> \n).                |
+|    - Thông tin file đổi tên (oldPath -> newPath) hoặc bị xóa (D).                 |
+|                                                                                   |
+| 2. Git Index Verification:                                                        |
+|    - Pre-commit Guard đọc trực tiếp nội dung staged từ Git Index qua              |
+|      `git show :<path>` hoặc `git ls-files --stage`.                              |
+|    - Đối chiếu SHA-256 của từng file staged với Approved Manifest.                |
+|    - Bác bỏ (REJECT) nếu staged content khác hash đã được duyệt.                  |
+|    - Bác bỏ (REJECT) nếu có file staged bị thiếu, thừa hoặc partial staging.      |
+|                                                                                   |
+| 3. Repository Scope Verification:                                                 |
+|    - Quét toàn bộ thay đổi trên toàn repository (`git status --porcelain=v1`).     |
+|    - Bác bỏ (REJECT) bất kỳ thay đổi nào ngoài phạm vi Task 3 chưa được duyệt.    |
+|    - Chỉ cho phép các ngoại lệ trạng thái hợp lệ đã định nghĩa rõ:               |
+|      .agents/state/STATE_LOCK.json, .agents/state/SESSION_MAP.json,               |
+|      .agents/state/CODE_REVIEW_FEEDBACK.md, .agents/state/MENTOR_FEEDBACK.md,     |
+|      .agents/state/HANDOFF.md, .agents/state/ROADMAP.md,                          |
+|      .agents/state/CURRENT_PLAN.md.                                               |
+|                                                                                   |
+| 4. Commit Authorization (Điều kiện phê chuẩn Commit):                             |
+|    - CODE_STATUS: APPROVED trong CODE_REVIEW_FEEDBACK.md.                         |
+|    - planSha256 hợp lệ và khớp STATE_LOCK.json.                                   |
+|    - codeSha256 hợp lệ và khớp STATE_LOCK.json.                                   |
+|    - npm test thực thi thành công (testExitCode = 0).                             |
+|    - Approved Manifest == Commit Manifest (Bất biến tam giác):                    |
+|      Approved Content SHA-256 == Git Index Content SHA-256 == Commit Content SHA  |
+|                                                                                   |
+| 5. Failure Policy:                                                                |
+|    - Bất kỳ điều kiện nào sai lệch: DỪNG VÀ CHẶN COMMIT NGAY LẬP TỨC              |
+|      (BLOCK COMMIT với exit code khác 0).                                         |
++-----------------------------------------------------------------------------------+
+```
+
+#### Chi tiết Thuật toán Manifest Determinism
+1. **Thu thập thay đổi toàn bộ Repo**:
+   - Sử dụng `git status --porcelain=v1` để liệt kê tất cả các file bị thay đổi (staged, unstaged, untracked).
+   - Phân loại file thành: file phạm vi review Task 3 (`src/`, `tests/`, `package.json`, `.agents/scripts/`), file trạng thái ngoại lệ, và file bất thường ngoài phạm vi.
+2. **Xây dựng Manifest**:
+   - Mỗi file được biểu diễn dưới dạng đối tượng: `{ path, status, sha256 }`.
+   - Với file Deleted (`D`): `sha256 = 'DELETED'`.
+   - Với file Renamed (`R`): lưu `{ path: newPath, oldPath, status: 'R', sha256 }`.
+   - Danh sách file được sắp xếp theo thứ tự từ điển (`localeCompare` hoặc `path < other.path`) để bảo đảm tính tất định 100%.
+   - Chuỗi manifest JSON xác định được băm bằng SHA-256 tạo ra `codeSha256`.
+3. **Pre-commit Guard Đối chiếu Git Index**:
+   - Khi chạy `git commit`, hook `.git/hooks/pre-commit` kích hoạt `verify_guard.mjs --pre-commit`.
+   - Guard đọc trực tiếp staged content qua `git show :<stagedPath>` và tính SHA-256 của từng file trong index.
+   - So sánh trực tiếp mảng staged manifest với Approved Manifest đã được khóa trong `STATE_LOCK.json`.
+   - Nếu phát hiện bất kỳ sự khác biệt nào giữa Working Tree, Git Index và Approved Content $\rightarrow$ Chặn commit ngay lập tức.
 
 ---
 
-### Nhóm 6: Xác thực Nghiêm ngặt Tham số ID (`parseTaskId` & Bảo toàn File khi ID Lỗi)
-- **T6.1 — Kiểm thử toàn diện `parseTaskId()`**:
-  - Hợp lệ: `1`, `999`, `'1'`, `'42'`, `Number.MAX_SAFE_INTEGER`, `String(Number.MAX_SAFE_INTEGER)`.
-  - Không hợp lệ (bắt buộc ném `Error`): `true`, `false`, `'1e0'`, `'1e5'`, `'0x1'`, `'0b1'`, `'0o1'`, `'01'`, `'007'`, `'+1'`, `' 1'`, `'1 '`, `0`, `-0`, `-1`, `'0'`, `'-1'`, `1.5`, `'1.5'`, `NaN`, `Infinity`, `-Infinity`, `Number.MAX_SAFE_INTEGER + 1`, `'9007199254740992'`, `''`, `'   '`, `null`, `undefined`, `{}`, `[]`, `[1]`.
-- **T6.2 — Kiểm tra `completeTask(id)` và `removeTask(id)` khi truyền ID không hợp lệ hoặc không tồn tại (Kèm kiểm tra `Buffer.compare`)**:
-  - Khởi tạo trước 1 task hợp lệ trong `filePath` và lưu `const beforeBuffer = fs.readFileSync(filePath)`.
-  - Truyền các giá trị ID không hợp lệ (`true`, `'1e0'`, `'01'`, `0`, `-5`, `null`) và ID không tồn tại (`999`) vào `completeTask` và `removeTask`.
-  - Sau mỗi lần gọi bị từ chối: xác minh hàm ném `Error` đúng quy định VÀ `Buffer.compare(fs.readFileSync(filePath), beforeBuffer) === 0` (file không hề bị thay đổi).
+## 4. Checklist Đối Chiếu Phê duyệt Design Gate v1.4 (6/6 Đạt)
 
----
-
-### Nhóm 7: Cô lập Khi Import, Hợp đồng `process.exitCode` của `runCli` & Tiến trình Con (`child_process.spawnSync`)
-- **T7.1 — Kiểm chứng tính an toàn khi import `require('./todo')` bằng tiến trình con độc lập (Khắc phục BLOCKER 01)**:
-  - Không dùng `require.cache` làm cơ chế cô lập chính.
-  - Trong `withTempWorkspace(({ tempDir, filePath }) => ...)`:
-    1. Tạo trước file `tasks.json` tại `filePath` (nằm trong `tempDir`) chứa dữ liệu sentinel hợp lệ và lưu `const sentinelBuffer = fs.readFileSync(filePath)`.
-    2. Xác định đường dẫn tuyệt đối tới `todo.js`: `const todoModulePath = path.resolve(__dirname, 'todo.js')`.
-    3. Khởi chạy một tiến trình Node.js con hoàn toàn mới với `cwd: tempDir`, biến môi trường đã xóa `TODO_FILE`, và `timeout: 10_000`:
-       ```js
-       const probeScript = [
-         'const mod = require(process.env.TARGET_TODO_MODULE);',
-         'if (process.exitCode !== undefined) { process.exit(2); }',
-         'if (typeof mod.addTask !== "function" || typeof mod.runCli !== "function") { process.exit(3); }',
-       ].join(' ');
-       const res = childProcess.spawnSync(process.execPath, ['-e', probeScript], {
-         cwd: tempDir,
-         env: { ...process.env, TODO_FILE: '', TARGET_TODO_MODULE: todoModulePath },
-         encoding: 'utf8',
-         timeout: 10_000,
-       });
-       ```
-    4. Xác minh toàn diện:
-       - `res.error === undefined`, `res.signal === null`, `res.status === 0`.
-       - `res.stdout === ''` và `res.stderr === ''` (tuyệt đối không phát sinh stdout/stderr khi nạp module lần đầu).
-       - `Buffer.compare(fs.readFileSync(filePath), sentinelBuffer) === 0` (file `tasks.json` sentinel trong `cwd` giữ nguyên từng byte).
-       - `assert.deepStrictEqual(fs.readdirSync(tempDir), ['tasks.json'])` (không tạo thêm bất kỳ file ngoài ý muốn nào).
-- **T7.2 — Kiểm thử trực tiếp `runCli(args, filePath)` và hợp đồng `process.exitCode` (Khắc phục BLOCKER 02)**:
-  - Sử dụng `captureCliExecution`:
-    - **Các lệnh thành công**:
-      - `['help']`, `['--help']`, `['-h']`.
-      - `['add', 'Mua', 'sách', 'Node.js']`.
-      - `['list']` (cả khi danh sách trống in `'Danh sách công việc trống.'` và khi có dữ liệu), `['list', 'all']`, `['list', 'pending']`, `['list', 'completed']`, `['list', '--all']`, `['list', '--pending']`, `['list', '--completed']`.
-      - `['done', '1']`, `['complete', '2']`.
-      - `['remove', '1']`, `['delete', '2']`.
-      - Với mọi lệnh thành công: xác minh đồng thời `returnValue === 0`, `exitCodeAfter === undefined` (không làm thay đổi `process.exitCode`), `stderr === ''`, và `stdout` khớp nội dung mong đợi.
-    - **Các lệnh thất bại**:
-      - `[]` (thiếu lệnh), `['unknown-cmd']` (lệnh không hợp lệ), `['add']`, `['add', '   ']` (thiếu tiêu đề), `['list', 'all', 'extra']` (dư tham số), `['list', 'invalid']`, `['list', '--invalid']` (sai filter), `['done']`, `['done', '1', '2']`, `['done', '01']`, `['done', '999']`, `['remove']`, `['delete', '1', '2']`, `['remove', '1e0']`, `['remove', '999']`.
-      - Với mọi lệnh thất bại: xác minh đồng thời `returnValue === 1`, `exitCodeAfter === 1` (`runCli` trực tiếp đặt `process.exitCode = 1`), và `stderr` chứa `'Lỗi:'`.
-- **T7.3 — Kiểm thử tích hợp CLI End-to-End qua tiến trình con (`child_process.spawnSync`)**:
-  - Đặt `timeout: 10_000` cho mọi lời gọi `spawnSync(process.execPath, [todoModulePath, ...args], { cwd: tempDir, env: { ...process.env, TODO_FILE: filePath }, encoding: 'utf8', timeout: 10_000 })`.
-  - Ở mọi bước (`add`, `list --pending`, `done 1`, `list --completed`, `delete 1`, và bước lỗi `done 0x1`):
-    - Luôn kiểm tra `assert.strictEqual(res.error, undefined)` và `assert.strictEqual(res.signal, null)`.
-    - Kiểm tra `res.status === 0` cho các lệnh hợp lệ và `res.status === 1` (kèm `res.stderr.includes('Lỗi:')`) cho lệnh không hợp lệ.
-
----
-
-### Nhóm 8: Kịch bản Ghi File Thất bại, Phạm vi Fault Injection & Dọn dẹp File Tạm (`Safe Write Failure & Temp Cleanup`)
-- **T8.1 — Tạo thư mục cha tự động & Kiểm tra toàn diện quy ước tên file tạm của `saveTasks()`**:
-  - Gọi `addTask` / `saveTasks` vào đường dẫn có thư mục con chưa tồn tại (`nestedFile = path.join(tempDir, 'nested', 'deep', 'tasks.json')`).
-  - Xác nhận thư mục được tạo tự động, file `tasks.json` đọc lại hợp lệ.
-  - Kiểm tra `entries = fs.readdirSync(path.dirname(nestedFile))`:
-    - `assert.deepStrictEqual(entries, ['tasks.json'])`.
-    - Không còn bất kỳ file tạm nào khớp tiền tố `.tasks.json.${process.pid}.` hay hậu tố `.tmp`.
-- **T8.2 — Mô phỏng lỗi có phạm vi (`Scoped Fault Injection`) khi `fs.renameSync` thất bại (`EACCES` / `EXDEV`)**:
-  - Khởi tạo trước 1 task hợp lệ trong `filePath`, lưu `beforeBuffer = fs.readFileSync(filePath)`.
-  - Lưu `const originalRenameSync = fs.renameSync`.
-  - Trong khối `try`:
-    - Chỉ kích hoạt lỗi mô phỏng khi đường dẫn đích thuộc `tempDir` (tránh ảnh hưởng ngoài phạm vi):
-      ```js
-      fs.renameSync = function scopedMockRenameSync(oldPath, newPath) {
-        if (String(newPath).startsWith(tempDir) || String(oldPath).startsWith(tempDir)) {
-          const err = new Error('Simulated renameSync EXDEV/EACCES failure');
-          err.code = 'EACCES';
-          throw err;
-        }
-        return originalRenameSync.call(this, oldPath, newPath);
-      };
-      ```
-    - Gọi `addTask('Task lỗi khi rename', filePath)`.
-    - Xác minh:
-      1. Hàm ném ra đúng lỗi gốc có `err.code === 'EACCES'` và thông điệp `'Simulated renameSync EXDEV/EACCES failure'`.
-      2. Kiểm tra `fs.readdirSync(tempDir)`: chỉ có duy nhất `['tasks.json']` (khối `catch` của `saveTasks` đã xóa sạch file `.tmp` vừa tạo trước khi `renameSync` lỗi).
-      3. `Buffer.compare(fs.readFileSync(filePath), beforeBuffer) === 0` (file gốc nguyên vẹn từng byte).
-  - Trong khối `finally`:
-    - Khôi phục `fs.renameSync = originalRenameSync`.
-- **T8.3 — Mô phỏng lỗi có phạm vi (`Scoped Fault Injection`) khi `fs.writeFileSync` thất bại (`ENOSPC`)**:
-  - Tương tự T8.2, chỉ kích hoạt lỗi `ENOSPC` (`Simulated writeFileSync ENOSPC disk full`) khi đường dẫn ghi nằm trong `tempDir`.
-  - Xác minh lỗi gốc `ENOSPC` được bảo toàn, `fs.readdirSync(tempDir)` chỉ còn `['tasks.json']` (không sót file `.tmp`), và `Buffer.compare(fs.readFileSync(filePath), beforeBuffer) === 0`.
-  - *Ghi chú giới hạn kỹ thuật (Technical Disclaimer)*: T8.2 và T8.3 sử dụng kỹ thuật tiêm lỗi ở tầng hàm JavaScript (`fs.renameSync`, `fs.writeFileSync`) để xác minh luồng rollback, dọn dẹp file tạm và bảo toàn lỗi gốc của `saveTasks()`, không tuyên bố thay thế việc kiểm chứng lỗi phần cứng/filesystem thực tế ở tầng nhân hệ điều hành.
-
----
-
-### Nhóm Bổ sung (T9): Tự Kiểm chứng Cơ chế Test Runner & Cleanup (`Runner Self-Verification` — Khắc phục BLOCKER 04 & 05)
-- **T9.1 — Kiểm chứng định lượng `runTestSuite` trên cả đường thành công (Positive) và đường thất bại (Negative)**:
-  - **Kịch bản A (Tất cả PASS)**:
-    - Gọi `resPass = runTestSuite([testPass1, testPass2], { silent: true, setExitCode: false })`.
-    - Xác minh: `resPass.total === 2`, `resPass.executed === 2`, `resPass.passed === 2`, `resPass.failed === 0`, `resPass.passed + resPass.failed === resPass.total`, `resPass.exitCode === 0`, `resPass.failures.length === 0`.
-  - **Kịch bản B (Cố ý tạo 1 assertion thất bại & Kiểm tra khôi phục mock khi test FAIL)**:
-    - Tạo biến cờ `let mockState = 'clean'`.
-    - Chạy `resFail = runTestSuite([test1Pass, test2IntentionalFailWithMockRestore, test3VerifyMockRestored], { silent: true, setExitCode: false })`, trong đó `test2IntentionalFailWithMockRestore` đổi `mockState = 'dirty'`, khôi phục `mockState = 'clean'` trong `finally`, và ném `assert.fail('Intentional test failure for runner verification')`.
-    - Xác minh:
-      1. `resFail.total === 3` và `resFail.executed === 3` (runner chạy đủ 3 test, không dừng đột ngột ở test 2).
-      2. `resFail.passed === 2`, `resFail.failed === 1`, `resFail.passed + resFail.failed === resFail.total`.
-      3. `resFail.exitCode === 1` (khác `0`).
-      4. `resFail.failures.length === 1`, `resFail.failures[0].name` khớp tên test 2, `resFail.failures[0].message` chứa `'Intentional test failure for runner verification'`, và có `stack` truy vết.
-      5. `mockState === 'clean'` (khôi phục mock không phụ thuộc vào kết quả `PASS`/`FAIL`).
-- **T9.2 — Kiểm chứng cơ chế xử lý lỗi Cleanup của `withTempWorkspace`**:
-  - **Trường hợp 1 (Test PASS nhưng Cleanup FAIL)**: Truyền hàm `rmSyncImpl` giả lập ném lỗi sau khi xóa thật thư mục tạm -> xác minh `withTempWorkspace` ném lỗi `[Cleanup Failure...]` (không báo PASS).
-  - **Trường hợp 2 (Test FAIL và Cleanup cũng FAIL)**: Test ném `new Error('Primary test error')` và `rmSyncImpl` cũng ném lỗi -> xác minh lỗi ném ra vẫn là `Primary test error` (bảo toàn lỗi gốc), đồng thời đính kèm thông tin `[Lỗi Cleanup kèm theo]` và thuộc tính `err.cleanupError`.
-
----
-
-## 4. Kế hoạch Kiểm chứng Sau khi Cài đặt (Verification Plan — Khắc phục BLOCKER 05)
-
-Sau khi nhận được `STATUS: APPROVED` từ ChatGPT Mentor:
-1. Triển khai file `todo.test.js` trong thư mục mã nguồn theo đúng thiết kế v1.1.
-2. Thực thi bộ kiểm thử và xác minh đầy đủ các tiêu chí nghiệm thu định lượng:
-   - Số lượng test đăng ký bằng chính xác số lượng test đã thực thi (`executed === total`).
-   - `passed + failed === total` (với `failed === 0`, `passed === total`).
-   - Toàn bộ các bài kiểm thử thuộc 8 nhóm nghiệm thu (T1.1 -> T8.3) và nhóm tự kiểm chứng runner (T9.1 -> T9.2) đều đạt `[PASS]`.
-   - Tiến trình kết thúc với mã thoát `exitCode === 0`.
-   - Kiểm chứng thực tế đường thất bại qua CLI: chạy một tiến trình con kiểm tra nhánh negative của `runTestSuite` trả về `exitCode === 1` khi có 1 assertion thất bại.
-   - Xác nhận thư mục dự án sạch sẽ, không phát sinh file `tasks.json` hay `.tmp` ngoài ý muốn.
-3. Sau khi toàn bộ bước kiểm chứng đạt 100%: đánh dấu hoàn thành `[x]` cho Task 2 trong `.agents/state/ROADMAP.md`, đặt lại `.agents/state/MENTOR_FEEDBACK.md` về `STATUS: PENDING` và cập nhật `.agents/state/HANDOFF.md`.
+- [x] **1. FS-3 có dữ liệu gốc và assertion bảo toàn từng byte**: Tạo trước file `tasks.json` hợp lệ, lưu `beforeBuffer`, sau lỗi khôi phục quyền thư mục để `Buffer.compare === 0` và xác nhận 0 file `.tmp` rò rỉ.
+- [x] **2. FS-3 mô tả đúng giới hạn kiểm thử lỗi tạo file tạm**: Định nghĩa rõ là kiểm thử lỗi không thể tạo/mở file tạm do quyền thư mục, không tuyên bố kiểm chứng lỗi ghi dở giữa chừng (vốn thuộc phạm vi `T8.3`).
+- [x] **3. FS-4 có capability probe độc lập và quy tắc SKIP/FAIL chính xác**: Chạy probe trước; nếu không hỗ trợ $\rightarrow$ SKIP có lý do; nếu probe hỗ trợ mà `saveTasks()` không lỗi $\rightarrow$ FAIL; tuyệt đối không chuyển lỗi thành SKIP; kiểm tra `err.syscall === 'rename'`.
+- [x] **4. Runner thống kê PASS + FAIL + SKIP = TOTAL**: Bổ sung hợp đồng `assert.strictEqual(passed + failed + skipped, total);`, `assert.strictEqual(executed, total);`, `const exitCode = failed > 0 ? 1 : 0;`. Trong đó `executed` là số scenario được runner xử lý.
+- [x] **5. Single-Gate Commit Policy**: `ask_mentor.mjs` thu thập toàn bộ thay đổi thuộc phạm vi Task 3 (staged, unstaged, untracked files và nội dung đầy đủ). Implementation Gate kiểm tra source code, test, `package.json`, agent scripts. Không commit bất kỳ file nào trước khi nhận `CODE_STATUS: APPROVED`.
+- [x] **6. Complete SHA-256 Integrity Coverage & Git Index Guard (INTEGRITY CONTRACT — TASK 3)**:
+  - Approved Manifest ghi nhận đầy đủ đường dẫn, trạng thái (A/M/D/R) và hash nội dung.
+  - Git Index Verification: Pre-commit Guard đọc staged content thực tế và so khớp với Approved Manifest; bảo đảm bất biến: `Approved Content SHA-256 == Git Index Content SHA-256 == Expected Commit Content SHA-256`.
+  - Repository Scope Verification: Quét toàn bộ repository, chặn commit nếu có thay đổi ngoài phạm vi Task 3.
+  - Commit Authorization & Failure Policy: Chặn commit ngay lập tức nếu bất kỳ điều kiện nào sai lệch.

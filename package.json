@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
-    "test": "node src/todo.test.js",
+    "test": "node src/todo.test.js && node tests/fs_fault.test.js",
     "ask-mentor": "node .agents/scripts/ask_mentor.mjs"
   },
   "keywords": [],

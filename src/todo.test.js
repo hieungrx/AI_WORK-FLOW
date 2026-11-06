@@ -25,8 +25,10 @@ function createBaseValidTask(overrides = {}) {
 
 function isInsideDir(targetPath, parentDir) {
   if (typeof targetPath !== 'string' || typeof parentDir !== 'string') return false;
-  const rel = path.relative(path.resolve(parentDir), path.resolve(targetPath));
-  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+  const resolvedParent = path.resolve(parentDir);
+  const resolvedTarget = path.resolve(targetPath);
+  const rel = path.relative(resolvedParent, resolvedTarget);
+  return rel !== '..' && !rel.startsWith('..' + path.sep) && !path.isAbsolute(rel);
 }
 
 function withTempWorkspace(fn, rmSyncImpl = fs.rmSync) {
@@ -214,6 +216,46 @@ const testCases = [
       assert.throws(() => saveTasks([createBaseValidTask({ id: -1 })], filePath), /id phải là số nguyên dương an toàn/);
       assert.strictEqual(Buffer.compare(fs.readFileSync(filePath), savedBuf), 0);
     }),
+  },
+  {
+    name: 'T1.5 — Kiểm tra tính đúng đắn và an toàn của isInsideDir() với các kịch bản biên',
+    fn: () => {
+      const baseDir = path.resolve(os.tmpdir(), 'todo-containment-check');
+
+      // 1. Trùng chính thư mục
+      assert.strictEqual(isInsideDir(baseDir, baseDir), true);
+
+      // 2. Thư mục con thông thường
+      assert.strictEqual(isInsideDir(path.join(baseDir, 'sub'), baseDir), true);
+
+      // 3. File con lồng sâu
+      assert.strictEqual(isInsideDir(path.join(baseDir, 'sub', 'deep', 'tasks.json'), baseDir), true);
+
+      // 4. Thư mục con có tên bắt đầu bằng ".." (edge case quan trọng)
+      assert.strictEqual(isInsideDir(path.join(baseDir, '..foo'), baseDir), true);
+      assert.strictEqual(isInsideDir(path.join(baseDir, '..cache', 'tasks.json'), baseDir), true);
+      assert.strictEqual(isInsideDir(path.join(baseDir, '...data'), baseDir), true);
+
+      // 5. Đường dẫn có chứa "." hoặc ".." nhưng sau khi resolve vẫn nằm trong baseDir
+      assert.strictEqual(isInsideDir(path.join(baseDir, 'sub', '..', 'sub', 'file.json'), baseDir), true);
+
+      // 6. Thư mục cha trực tiếp
+      assert.strictEqual(isInsideDir(path.resolve(baseDir, '..'), baseDir), false);
+
+      // 7. Thư mục anh em
+      assert.strictEqual(isInsideDir(path.resolve(baseDir, '..', 'sibling'), baseDir), false);
+
+      // 8. Khác ổ đĩa trên Windows (nếu có 2 ổ đĩa khác nhau)
+      if (process.platform === 'win32') {
+        assert.strictEqual(isInsideDir('C:\\data\\tasks.json', 'D:\\data'), false);
+      }
+
+      // 9. Đầu vào không hợp lệ
+      for (const badInput of [null, undefined, 123, {}, [], true, Symbol('test')]) {
+        assert.strictEqual(isInsideDir(badInput, baseDir), false);
+        assert.strictEqual(isInsideDir(baseDir, badInput), false);
+      }
+    },
   },
   {
     name: 'T2.1 — Xóa phần tử ở giữa danh sách không tái sử dụng ID bị khuyết ở giữa',
@@ -605,6 +647,9 @@ const testCases = [
       assert.strictEqual(passSuite.passed, 2);
       assert.strictEqual(passSuite.failed, 0);
       assert.strictEqual(passSuite.exitCode, 0);
+      assert.strictEqual(Array.isArray(passSuite.failures), true);
+      assert.strictEqual(passSuite.failures.length, 0);
+      assert.strictEqual(passSuite.passed + passSuite.failed, passSuite.total);
 
       let mockFlag = 'restored';
       const failSuite = runTestSuite([
@@ -624,7 +669,14 @@ const testCases = [
       assert.strictEqual(failSuite.passed, 2);
       assert.strictEqual(failSuite.failed, 1);
       assert.strictEqual(failSuite.exitCode, 1);
+      assert.strictEqual(failSuite.passed + failSuite.failed, failSuite.total);
+      assert.strictEqual(failSuite.failures.length, 1);
       assert.strictEqual(failSuite.failures[0].name, 'Step 2 Intentional Fail');
+      assert.ok(failSuite.failures[0].error instanceof assert.AssertionError);
+      assert.strictEqual(failSuite.failures[0].error.message, 'Intentional assertion failure for runner check');
+      assert.strictEqual(failSuite.failures[0].message, 'Intentional assertion failure for runner check');
+      assert.strictEqual(typeof failSuite.failures[0].stack, 'string');
+      assert.ok(failSuite.failures[0].stack.includes('Intentional assertion failure for runner check'));
       assert.strictEqual(mockFlag, 'restored');
 
       const childRes = childProcess.spawnSync(process.execPath, [__filename, '--simulate-runner-failure'], {
@@ -634,6 +686,7 @@ const testCases = [
       assert.strictEqual(childRes.signal, null);
       assert.strictEqual(childRes.status, 1);
       assert.ok(childRes.stderr.includes('[FAIL] Simulated Failing Test'));
+      assert.ok(childRes.stdout.includes('=== TỔNG KẾT: 1/2 PASS | 1/2 FAIL (Executed: 2) ==='));
     },
   },
   {

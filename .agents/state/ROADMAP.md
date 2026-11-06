@@ -10,3 +10,4 @@ Xây dựng ứng dụng CLI quản lý danh sách công việc (Todo CLI) bằn
 ## Danh sách Công việc (Tasks)
 - [x] [WORKER_MODEL: pro] Task 1: Viết module `src/todo.js` hỗ trợ thêm, xóa, liệt kê và đánh dấu hoàn thành task (lưu vào `tasks.json`).
 - [x] [WORKER_MODEL: pro/flash] Task 2: Viết script kiểm thử tự động `src/todo.test.js` kiểm tra toàn bộ các hàm của `src/todo.js`.
+- [x] [WORKER_MODEL: pro/flash] Task 3: Giải quyết triệt để 3 mục Technical Debt (tinh chỉnh Path containment `isInsideDir`, bổ sung assertion định lượng cho Runner self-verification `T9.1`, và xây dựng bộ kiểm thử lỗi Filesystem thực tế không dùng mock trong `tests/fs_fault.test.js`).

@@ -47,13 +47,15 @@ Mọi Agent phải tuân thủ nghiêm ngặt quy trình RPIR khép kín đượ
    - Nếu nhận được **`CODE_STATUS: REJECTED`**, Agent phải sửa code theo phản hồi trong `.agents/state/CODE_REVIEW_FEEDBACK.md`, chạy lại test và gọi lại `--mode review-code --task <task_id>`.
 6. **Handoff**: Cập nhật `.agents/state/HANDOFF.md` trước khi kết thúc phiên.
 
-## 3. Quy tắc Khóa An toàn & Khóa Mã băm SHA-256 (Safety Gate & Pre-commit Guard)
-- **Khóa trước khi sửa code (`--check-plan`)**: Hook `.agents/scripts/check_plan_approved.sh` tự động gọi `node .agents/scripts/verify_guard.mjs --check-plan` trước mọi thao tác ghi/sửa vào `src/`. Thao tác sẽ bị chặn (`exit 2`) nếu `MENTOR_FEEDBACK.md` chưa có `STATUS: APPROVED` hoặc `CURRENT_PLAN.md` bị chỉnh sửa sau khi duyệt (lệch `planSha256` trong `STATE_LOCK.json`).
-- **Khóa trước khi Git Commit (`--pre-commit`)**: Hook `.git/hooks/pre-commit` tự động gọi `node .agents/scripts/verify_guard.mjs --pre-commit`. Mọi lệnh `git commit` có chứa thay đổi trong `src/` (hoặc `tests/`) hoặc đánh dấu hoàn thành `[x]` trong `.agents/state/ROADMAP.md` bắt buộc phải thỏa mãn:
+## 3. Quy tắc Khóa An toàn & Bảo vệ Công cụ (Safety Gate & Tool Protection)
+- **Bảo vệ bộ công cụ điều phối**: *"Khi thực hiện các Task trong `ROADMAP.md`, Worker chỉ làm việc trên `src/`, `tests/` và `.agents/state/`. TUYỆT ĐỐI KHÔNG tự ý chỉnh sửa các script trong `.agents/scripts/`."*
+- **Giới hạn phạm vi & số vòng Review Code (`ask_mentor.mjs`)**:
+  - Ở chế độ `--mode review-code`, chỉ gửi kết quả chạy `npm test` + `git diff HEAD -- src/ tests/` (kèm danh sách/nội dung file mới trong `src/`, `tests/`). Tuyệt đối KHÔNG gửi kèm code của `.agents/` vào gói review.
+  - Giới hạn cứng: Không tự động gửi quá 2 vòng review cho cùng một giai đoạn (`MAX_ROUNDS_PER_STAGE = 2`).
+- **Khóa trước khi sửa code (`--check-plan`)**: Hook `.agents/scripts/check_plan_approved.sh` tự động gọi `node .agents/scripts/verify_guard.mjs --check-plan` trước mọi thao tác ghi/sửa vào `src/`. Thao tác sẽ bị chặn (`exit 2`) nếu `.agents/state/MENTOR_FEEDBACK.md` chưa có `STATUS: APPROVED`.
+- **Khóa trước khi Git Commit (`--pre-commit`)**: Hook `.git/hooks/pre-commit` tự động gọi `node .agents/scripts/verify_guard.mjs --pre-commit`. Khi commit có thay đổi trong `src/` hoặc `tests/`, bắt buộc phải thỏa mãn:
   1. `.agents/state/CODE_REVIEW_FEEDBACK.md` có `CODE_STATUS: APPROVED`.
-  2. `testExitCode === 0` trong `.agents/state/STATE_LOCK.json`.
-  3. Mã băm diff hiện tại của `src/` và `tests/` khớp tuyệt đối với `codeSha256` trong `.agents/state/STATE_LOCK.json` (chống sửa code lén sau khi Mentor review).
-  *(Cho phép commit các file cấu hình/hạ tầng trong `.agents/` khi không chạm tới `src/` và không đánh dấu `[x]` mới trong `ROADMAP.md`).*
+  2. Chạy `npm test` đạt `exitCode === 0`.
 
 ## 4. Kết thúc Phiên & Bàn giao (Mandatory Handoff)
 - Trước khi dừng hoặc kết thúc phiên làm việc (hoặc khi hết hạn mức/chuyển đổi tài khoản), Agent **LUÔN LUÔN** phải cập nhật đầy đủ trạng thái hiện tại, những việc đã làm, và bước tiếp theo vào `.agents/state/HANDOFF.md`.
