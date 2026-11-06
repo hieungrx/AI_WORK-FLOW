@@ -4,12 +4,13 @@
   "main": "index.js",
   "scripts": {
     "test": "node src/todo.test.js && node tests/fs_fault.test.js",
-    "ask-mentor": "node .agents/scripts/ask_mentor.mjs"
+    "ask-mentor": "node .agents/scripts/ask_mentor.mjs",
+    "init-workflow": "node .agents/scripts/init_project.mjs"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "description": "",
+  "description": "Multi-Account Antigravity + ChatGPT Mentor RPIR Starter Template",
   "dependencies": {
     "playwright-core": "^1.65.0"
   }

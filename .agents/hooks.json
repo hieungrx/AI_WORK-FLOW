@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash .agents/scripts/check_plan_approved.sh"
+            "command": "if [ -f ./scripts/check_plan_approved.sh ]; then bash ./scripts/check_plan_approved.sh; else bash .agents/scripts/check_plan_approved.sh; fi"
           }
         ]
       }

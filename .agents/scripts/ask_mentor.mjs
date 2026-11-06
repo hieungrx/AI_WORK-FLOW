@@ -6,22 +6,30 @@ import childProcess from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright-core';
 import os from 'node:os';
+import { loadWorkflowConfig } from './verify_guard.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
 
-const DEFAULT_CDP_URL = 'http://localhost:9222';
+const WORKFLOW_CONFIG = loadWorkflowConfig(REPO_ROOT);
+const DEFAULT_PROJECT_NAME = WORKFLOW_CONFIG.projectName || 'AI-WORKSPACE';
+const DEFAULT_CDP_URL = WORKFLOW_CONFIG.cdpUrl || 'http://127.0.0.1:9222';
 const DEFAULT_PROJECT_URL = 'https://chatgpt.com/';
 const DEFAULT_MODE = 'plan';
 const VALID_MODES = new Set(['plan', 'review-code', 'rescue']);
 const MAX_DIFF_CHARS = 300_000;
-// Phạm vi review code: CHỈ mã nguồn ứng dụng, tuyệt đối không gửi .agents/
-const REVIEW_SCOPE = ['src', 'tests'];
+// Phạm vi review code: đọc từ .agents/config.json (mặc định ['src', 'tests']), tuyệt đối không gửi .agents/
+const REVIEW_SCOPE =
+  Array.isArray(WORKFLOW_CONFIG.sourceDirs) && WORKFLOW_CONFIG.sourceDirs.length > 0
+    ? WORKFLOW_CONFIG.sourceDirs
+    : ['src', 'tests'];
+const TEST_COMMAND = WORKFLOW_CONFIG.testCommand || 'npm test';
 // Nếu phần code (diff + file mới) dài hơn ngưỡng này -> đính kèm dạng tệp thay vì dán vào ô chat
 const MAX_INLINE_CODE_CHARS = 20_000;
-// Giới hạn cứng: tối đa 2 vòng gửi Mentor cho cùng một giai đoạn (task-x-plan / task-x-review / task-x-rescue)
-const MAX_ROUNDS_PER_STAGE = 2;
+// Giới hạn cứng số vòng review cho cùng một giai đoạn (đọc từ .agents/config.json, mặc định 2)
+const MAX_ROUNDS_PER_STAGE =
+  Number(WORKFLOW_CONFIG.maxReviewRounds) > 0 ? Number(WORKFLOW_CONFIG.maxReviewRounds) : 2;
 
 const STATE_DIR = path.join(REPO_ROOT, '.agents', 'state');
 const PLAN_FILE = path.join(STATE_DIR, 'CURRENT_PLAN.md');
@@ -196,7 +204,7 @@ function getThreadKey(taskId, mode) {
  */
 function loadSessionMap() {
   const fallback = {
-    projectName: 'AI-WORKSPACE',
+    projectName: DEFAULT_PROJECT_NAME,
     projectUrl: DEFAULT_PROJECT_URL,
     currentTask: '',
     threads: {},
@@ -214,7 +222,7 @@ function loadSessionMap() {
     const projectName =
       typeof parsed.projectName === 'string' && parsed.projectName.trim()
         ? parsed.projectName.trim()
-        : 'AI-WORKSPACE';
+        : DEFAULT_PROJECT_NAME;
     const projectUrl =
       typeof parsed.projectUrl === 'string' && parsed.projectUrl.trim()
         ? parsed.projectUrl.trim()
@@ -476,10 +484,10 @@ function collectReviewSnapshot(repoRoot = REPO_ROOT) {
     process.platform === 'win32'
       ? childProcess.spawnSync(
           process.env.ComSpec || 'cmd.exe',
-          ['/d', '/s', '/c', 'npm test'],
+          ['/d', '/s', '/c', TEST_COMMAND],
           testOptions
         )
-      : childProcess.spawnSync('npm', ['test'], testOptions);
+      : childProcess.spawnSync('sh', ['-c', TEST_COMMAND], testOptions);
 
   const positiveTestExitCode =
     !npmTestRes.error && npmTestRes.signal === null && npmTestRes.status === 0
@@ -626,13 +634,13 @@ function buildMentorPrompt(
  * @param {{ projectName?: string, projectUrl: string, currentTask: string, threads: Record<string, { url: string, updatedAt: string }> }} sessionMap
  * @returns {Promise<string>}
  */
-async function ensureProjectUrl(page, sessionMap, projectName = 'AI-WORKSPACE') {
+async function ensureProjectUrl(page, sessionMap, projectName = DEFAULT_PROJECT_NAME) {
   const currentProjectUrl = (sessionMap?.projectUrl || '').trim();
   if (/^https:\/\/chatgpt\.com\/g\/g-p-[a-z0-9]+/i.test(currentProjectUrl)) {
     return currentProjectUrl;
   }
 
-  const targetName = (projectName || sessionMap?.projectName || 'AI-WORKSPACE').trim();
+  const targetName = (projectName || sessionMap?.projectName || DEFAULT_PROJECT_NAME).trim();
   console.log(`[PROJECT RESOLUTION]: Đang tìm kiếm dự án "${targetName}" trên giao diện ChatGPT...`);
 
   try {
@@ -722,7 +730,7 @@ async function prepareTaskThread(
   const targetProjectUrl = await ensureProjectUrl(
     page,
     sessionMap,
-    projectName || sessionMap?.projectName || 'AI-WORKSPACE'
+    projectName || sessionMap?.projectName || DEFAULT_PROJECT_NAME
   );
 
   const normalizedExistingUrl =

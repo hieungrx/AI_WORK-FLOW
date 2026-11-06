@@ -1,0 +1,3 @@
+#!/usr/bin/env sh
+# Git Pre-commit Hook: Kiểm tra CODE_STATUS: APPROVED và chạy bộ kiểm thử trước khi commit
+node .agents/scripts/verify_guard.mjs --pre-commit

@@ -1,3 +1,5 @@
 node_modules/
+.ag-account-*/
 tasks.json
+*_bundle.txt
 .*.tmp
