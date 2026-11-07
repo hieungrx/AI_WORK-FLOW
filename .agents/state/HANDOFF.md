@@ -33,22 +33,30 @@ Dự án Demo minh họa kiến trúc điều phối **Multi-Account Antigravity
 
 ---
 
+<!-- AUTO_CHECKPOINT_START -->
 ## Snapshot Cứu Hộ Quota (Auto-Checkpoint)
-- **Thời gian Checkpoint**: `2026-11-07T08:10:05.694Z`
+- **Thời gian Checkpoint**: `2026-11-07T10:36:29.072Z`
 - **Task đang mở (`taskId`)**: `task-3`
-- **Ghi chú (`--note`)**: Test checkpoint Level 1
+- **Ghi chú (`--note`)**: Verify Level 1.1 patch
+- **Bản sao lưu Patch**: `.agents/state/checkpoint.patch` (24670 bytes)
 - **Tóm tắt Test (`npm test`)**: **PASS** (`exitCode: 0`) — [PASS] FS-5 — Baseline Verification: Toàn vẹn End-to-End chu trình CRUD thực tế không rò rỉ file .tmp (Kiểm chứng đĩa từng bước) | [PASS] FS-SYMLINK-CLEANUP — Kiểm chứng an toàn khi workspace chứa Symbolic Link (Không đổi quyền hay xóa file ngoài) | [PASS] FS-SELF-CLEANUP — Tự kiểm chứng lỗi Cleanup của withIsolatedFaultWorkspace (Không nuốt lỗi) | [PASS] FS-NESTED-CLEANUP — Kiểm chứng dọn dẹp an toàn khi workspace chứa thư mục con lồng nhau và file chỉ đọc trên POSIX | === TỔNG KẾT FS FAULT: 7/8 PASS | 0/8 FAIL | 1/8 SKIP (Executed: 8) === | --- CÁC KỊCH BẢN BỎ QUA DO GIỚI HẠN HĐH (SKIP) ---
 - **Trạng thái Git (`git status --short`)**:
   ```text
   M .agents/scripts/ask_mentor.mjs
-   M README.md
-   M package.json
-  ?? .agents/scripts/checkpoint.mjs
+   M .agents/scripts/checkpoint.mjs
+   M .agents/scripts/verify_guard.mjs
+   M .agents/state/HANDOFF.md
+   M .agents/state/STATE_LOCK.json
+   M .gitignore
   ```
-- **Thống kê Diff (`git diff --stat`)**:
+- **Thống kê Diff (`git diff HEAD --stat`)**:
   ```text
-  .agents/scripts/ask_mentor.mjs | 260 +++++++++++++++++++++++++++++++++++++----
-   README.md                      |  14 ++-
-   package.json                   |   3 +-
-   3 files changed, 255 insertions(+), 22 deletions(-)
+  .agents/scripts/ask_mentor.mjs   | 114 ++++++++++++++++++++++++++++++++++++---
+   .agents/scripts/checkpoint.mjs   |  72 ++++++++++++++++++++-----
+   .agents/scripts/verify_guard.mjs |  93 ++++++++++++++++++++++++++++----
+   .agents/state/HANDOFF.md         |  26 +++++----
+   .agents/state/STATE_LOCK.json    |   8 ++-
+   .gitignore                       |   3 +-
+   6 files changed, 271 insertions(+), 45 deletions(-)
   ```
+<!-- AUTO_CHECKPOINT_END -->

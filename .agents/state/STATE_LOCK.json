@@ -1,8 +1,6 @@
 {
   "taskId": "task-3",
-  "planSha256": "6dee018e9ed93d320c43e998688f6f33e2eae2df230451882c2d785f31dd41e4",
-  "planApprovedAt": "2026-11-06T16:36:30.606Z",
-  "codeSha256": "",
-  "testExitCode": 0,
-  "codeApprovedAt": ""
+  "planHash": "6dee018e9ed93d320c43e998688f6f33e2eae2df230451882c2d785f31dd41e4",
+  "codeDiffHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "updatedAt": "2026-11-07T10:33:00.000Z"
 }

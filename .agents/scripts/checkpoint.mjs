@@ -4,17 +4,21 @@ import path from 'node:path';
 import process from 'node:process';
 import childProcess from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { loadWorkflowConfig } from './verify_guard.mjs';
+import { loadWorkflowConfig, stageIntentToAdd } from './verify_guard.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
 const STATE_DIR = path.join(REPO_ROOT, '.agents', 'state');
 const HANDOFF_FILE = path.join(STATE_DIR, 'HANDOFF.md');
+const PATCH_FILE = path.join(STATE_DIR, 'checkpoint.patch');
 const SESSION_MAP_FILE = path.join(STATE_DIR, 'SESSION_MAP.json');
 const STATE_LOCK_FILE = path.join(STATE_DIR, 'STATE_LOCK.json');
 const ROADMAP_FILE = path.join(STATE_DIR, 'ROADMAP.md');
 const PLAN_FILE = path.join(STATE_DIR, 'CURRENT_PLAN.md');
+
+const CHECKPOINT_START_TAG = '<!-- AUTO_CHECKPOINT_START -->';
+const CHECKPOINT_END_TAG = '<!-- AUTO_CHECKPOINT_END -->';
 
 /**
  * Phân tích tham số CLI (`--note "<ghi chú>"` hoặc `--note=<ghi chú>`).
@@ -31,6 +35,9 @@ function parseArgs(argv) {
       i += 1;
     } else if (arg.startsWith('--note=')) {
       note = arg.slice('--note='.length).trim();
+    } else if (!arg.startsWith('-') && !note) {
+      note = argv.slice(i).join(' ').trim();
+      break;
     }
   }
   return { note };
@@ -58,7 +65,11 @@ function resolveOpenTaskId() {
   try {
     if (fs.existsSync(SESSION_MAP_FILE)) {
       const sessionMap = JSON.parse(fs.readFileSync(SESSION_MAP_FILE, 'utf8'));
-      if (sessionMap && typeof sessionMap.currentTask === 'string' && sessionMap.currentTask.trim()) {
+      if (
+        sessionMap &&
+        typeof sessionMap.currentTask === 'string' &&
+        sessionMap.currentTask.trim()
+      ) {
         return sessionMap.currentTask.trim();
       }
     }
@@ -67,7 +78,11 @@ function resolveOpenTaskId() {
   try {
     if (fs.existsSync(STATE_LOCK_FILE)) {
       const stateLock = JSON.parse(fs.readFileSync(STATE_LOCK_FILE, 'utf8'));
-      if (stateLock && typeof stateLock.taskId === 'string' && stateLock.taskId.trim()) {
+      if (
+        stateLock &&
+        typeof stateLock.taskId === 'string' &&
+        stateLock.taskId.trim()
+      ) {
         return stateLock.taskId.trim();
       }
     }
@@ -87,7 +102,7 @@ function resolveOpenTaskId() {
 }
 
 /**
- * Chạy nhanh lệnh git và trả về stdout đã cắt khoảng trắng.
+ * Chạy nhanh lệnh git và trả về stdout.
  *
  * @param {string[]} args
  * @returns {string}
@@ -99,6 +114,7 @@ function runGitCommand(args) {
         cwd: REPO_ROOT,
         encoding: 'utf8',
         stdio: ['ignore', 'pipe', 'pipe'],
+        maxBuffer: 50 * 1024 * 1024,
       })
       .trim();
   } catch (err) {
@@ -154,7 +170,8 @@ function runQuickTestSummary(testCommand) {
 }
 
 /**
- * Cập nhật hoặc thêm mới khối `## Snapshot Cứu Hộ Quota (Auto-Checkpoint)` vào `.agents/state/HANDOFF.md`.
+ * Cập nhật hoặc ghi đè khối `## Snapshot Cứu Hộ Quota (Auto-Checkpoint)` trong `.agents/state/HANDOFF.md`
+ * thông qua cặp thẻ `<!-- AUTO_CHECKPOINT_START -->` và `<!-- AUTO_CHECKPOINT_END -->`.
  *
  * @param {string} checkpointSection
  */
@@ -167,14 +184,24 @@ function upsertCheckpointIntoHandoff(checkpointSection) {
     existing = '# HANDOFF: Trạng thái Bàn giao Phiên làm việc\n';
   }
 
-  const sectionHeadingRegex =
+  const wrappedBlock = [
+    CHECKPOINT_START_TAG,
+    checkpointSection,
+    CHECKPOINT_END_TAG,
+  ].join('\n');
+
+  const markerRegex =
+    /<!-- AUTO_CHECKPOINT_START -->[\s\S]*?<!-- AUTO_CHECKPOINT_END -->/;
+  const legacyHeadingRegex =
     /(?:^|\r?\n)(?:---\r?\n\r?\n)?## Snapshot Cứu Hộ Quota \(Auto-Checkpoint\)[\s\S]*$/i;
 
   let updated = '';
-  if (sectionHeadingRegex.test(existing)) {
-    updated = `${existing.replace(sectionHeadingRegex, '').trimEnd()}\n\n---\n\n${checkpointSection}\n`;
+  if (markerRegex.test(existing)) {
+    updated = `${existing.replace(markerRegex, wrappedBlock).trimEnd()}\n`;
+  } else if (legacyHeadingRegex.test(existing)) {
+    updated = `${existing.replace(legacyHeadingRegex, '').trimEnd()}\n\n---\n\n${wrappedBlock}\n`;
   } else {
-    updated = `${existing.trimEnd()}\n\n---\n\n${checkpointSection}\n`;
+    updated = `${existing.trimEnd()}\n\n---\n\n${wrappedBlock}\n`;
   }
 
   fs.writeFileSync(HANDOFF_FILE, updated, 'utf8');
@@ -183,12 +210,32 @@ function upsertCheckpointIntoHandoff(checkpointSection) {
 function main() {
   const { note } = parseArgs(process.argv.slice(2));
   const config = loadWorkflowConfig(REPO_ROOT);
+  const sourceDirs =
+    Array.isArray(config.sourceDirs) && config.sourceDirs.length > 0
+      ? config.sourceDirs
+      : ['src', 'tests'];
   const testCommand = config.testCommand || 'npm test';
+
+  // 1. Chạy git add -N <sourceDirs> để theo dõi cả các file mới chưa stage
+  stageIntentToAdd(REPO_ROOT, sourceDirs);
+
+  // 2. Lưu bản sao lưu code đang sửa dở ra .agents/state/checkpoint.patch
+  fs.mkdirSync(STATE_DIR, { recursive: true });
+  let fullDiff = '';
+  try {
+    fullDiff = childProcess.execFileSync('git', ['diff', 'HEAD'], {
+      cwd: REPO_ROOT,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      maxBuffer: 50 * 1024 * 1024,
+    });
+  } catch (_err) {}
+  fs.writeFileSync(PATCH_FILE, fullDiff, 'utf8');
 
   const timestamp = new Date().toISOString();
   const taskId = resolveOpenTaskId();
   const gitStatus = runGitCommand(['status', '--short']) || '(Working tree sạch)';
-  const gitDiffStat = runGitCommand(['diff', '--stat']) || '(Không có thay đổi chưa stage)';
+  const gitDiffStat = runGitCommand(['diff', 'HEAD', '--stat']) || '(Không có thay đổi so với HEAD)';
   const testResult = runQuickTestSummary(testCommand);
 
   const checkpointSection = [
@@ -196,12 +243,13 @@ function main() {
     `- **Thời gian Checkpoint**: \`${timestamp}\``,
     `- **Task đang mở (\`taskId\`)**: \`${taskId}\``,
     `- **Ghi chú (\`--note\`)**: ${note || '(Không có ghi chú)'}`,
+    `- **Bản sao lưu Patch**: \`.agents/state/checkpoint.patch\` (${fullDiff.length} bytes)`,
     `- **Tóm tắt Test (\`${testCommand}\`)**: **${testResult.statusLabel}** (\`exitCode: ${testResult.exitCode}\`) — ${testResult.summaryLines}`,
     '- **Trạng thái Git (`git status --short`)**:',
     '  ```text',
     ...gitStatus.split(/\r?\n/).map((line) => `  ${line}`),
     '  ```',
-    '- **Thống kê Diff (`git diff --stat`)**:',
+    '- **Thống kê Diff (`git diff HEAD --stat`)**:',
     '  ```text',
     ...gitDiffStat.split(/\r?\n/).map((line) => `  ${line}`),
     '  ```',
@@ -209,7 +257,7 @@ function main() {
 
   upsertCheckpointIntoHandoff(checkpointSection);
   console.log(
-    `[CHECKPOINT SAVED]: Đã cập nhật Snapshot Cứu Hộ Quota vào .agents/state/HANDOFF.md (Task: ${taskId} | Test: ${testResult.statusLabel}, exitCode=${testResult.exitCode}).`
+    `[CHECKPOINT SAVED]: Đã cập nhật Snapshot Cứu Hộ Quota vào .agents/state/HANDOFF.md và .agents/state/checkpoint.patch (Task: ${taskId} | Test: ${testResult.statusLabel}, exitCode=${testResult.exitCode}).`
   );
 }
 

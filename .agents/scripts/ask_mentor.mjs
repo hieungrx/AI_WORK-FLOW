@@ -6,7 +6,14 @@ import childProcess from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright-core';
 import os from 'node:os';
-import { loadWorkflowConfig } from './verify_guard.mjs';
+import {
+  loadWorkflowConfig,
+  stageIntentToAdd,
+  computePlanHash,
+  computeCodeDiffHash,
+  loadStateLock,
+  saveStateLock,
+} from './verify_guard.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -550,6 +557,7 @@ export function buildRepoSkeleton(
       ? sourceDirs
       : REVIEW_SCOPE;
   const collectedFiles = [];
+  const isTestFile = (name) => /\.(?:test|spec)\.[^.]+$/i.test(name);
 
   function walkDir(currentAbsPath) {
     let entries = [];
@@ -571,7 +579,7 @@ export function buildRepoSkeleton(
       const fullPath = path.join(currentAbsPath, entry.name);
       if (entry.isDirectory()) {
         walkDir(fullPath);
-      } else if (entry.isFile()) {
+      } else if (entry.isFile() && !isTestFile(entry.name)) {
         collectedFiles.push(fullPath);
       }
     }
@@ -584,7 +592,7 @@ export function buildRepoSkeleton(
         const stat = fs.statSync(absDir);
         if (stat.isDirectory()) {
           walkDir(absDir);
-        } else if (stat.isFile()) {
+        } else if (stat.isFile() && !isTestFile(path.basename(absDir))) {
           collectedFiles.push(absDir);
         }
       } catch (_err) {
@@ -617,15 +625,38 @@ export function buildRepoSkeleton(
 
     const lines = content.split(/\r?\n/);
     const fileSignatures = [];
+    let inBlockComment = false;
     for (let i = 0; i < lines.length; i += 1) {
       const trimmed = lines[i].trim();
-      if (!trimmed || trimmed.startsWith('//') || trimmed.startsWith('#') || trimmed.startsWith('*')) {
+      if (inBlockComment) {
+        if (trimmed.includes('*/')) {
+          inBlockComment = false;
+        }
+        continue;
+      }
+      if (trimmed.startsWith('/*')) {
+        if (!trimmed.includes('*/')) {
+          inBlockComment = true;
+        }
+        continue;
+      }
+      if (
+        !trimmed ||
+        trimmed.startsWith('//') ||
+        trimmed.startsWith('#') ||
+        trimmed.startsWith('*') ||
+        trimmed.startsWith('*/')
+      ) {
         continue;
       }
       if (signatureRegex.test(trimmed)) {
         const cleanSig = trimmed.replace(/\s*\{+\s*$/, '').slice(0, 160);
         fileSignatures.push(`  L${i + 1}: ${cleanSig}`);
       }
+    }
+
+    if (fileSignatures.length === 0) {
+      continue;
     }
 
     outputLines.push(`[FILE] ${relPath}`);
@@ -726,6 +757,7 @@ function truncateSafely(text, maxChars = MAX_DIFF_CHARS) {
  * }}
  */
 function collectReviewSnapshot(repoRoot = REPO_ROOT) {
+  stageIntentToAdd(repoRoot, REVIEW_SCOPE);
   const scopeArgs = REVIEW_SCOPE.join(' ');
   let gitStatus = '';
   let gitDiff = '';
@@ -1062,10 +1094,19 @@ async function prepareTaskThread(
 
   // 2. Tiếp tục luồng chat hiện có nếu không phải tạo thread mới
   if (!effectiveNewThread && normalizedExistingUrl) {
+    const expectedConvMatch = normalizedExistingUrl.match(CONVERSATION_URL_REGEX);
+    const expectedConvId = expectedConvMatch ? expectedConvMatch[1] : '';
     if (!currentUrl.startsWith(normalizedExistingUrl)) {
       await page.goto(normalizedExistingUrl, { waitUntil: 'domcontentloaded' });
+      await sleep(1500);
     }
-    return { previousConversationId, effectiveNewThread: false };
+    const landedUrl = page.url();
+    if (!expectedConvId || landedUrl.includes(expectedConvId)) {
+      return { previousConversationId, effectiveNewThread: false };
+    }
+    console.log(
+      `[DEAD THREAD RECOVERY]: Luồng chat cũ (${expectedConvId}) đã bị xóa hoặc chuyển hướng (${landedUrl}). Tự động tạo luồng mới trong Project...`
+    );
   }
 
   // 3. Khởi tạo luồng chat mới (effectiveNewThread === true):
@@ -1278,9 +1319,8 @@ export async function setThinkingEffort(page, mode = 'plan', explicitEffort = ''
       menuOpened = false;
     }
   } catch (_err) {
-    if (menuOpened) {
-      await page.keyboard.press('Escape').catch(() => {});
-    }
+    await page.keyboard.press('Escape').catch(() => {});
+    menuOpened = false;
   }
 }
 
@@ -1754,6 +1794,41 @@ async function main() {
     `[PAYLOAD INFO]: Giai đoạn "${threadKey}" (Vòng ${nextRound}/${MAX_ROUNDS_PER_STAGE}) | Chuyên gia: [${roleSummary}] | Kích thước prompt: ${reviewPrompt.length} ký tự.`
   );
 
+  // Pre-Send Reset: Vô hiệu hóa trạng thái APPROVED cũ trước khi kết nối Chrome
+  fs.mkdirSync(STATE_DIR, { recursive: true });
+  const currentLock = loadStateLock(REPO_ROOT);
+  if (mode === 'review-code') {
+    fs.writeFileSync(
+      CODE_REVIEW_FILE,
+      `CODE_STATUS: PENDING (Task: ${taskId})\n`,
+      'utf8'
+    );
+    saveStateLock(
+      {
+        taskId,
+        planHash: currentLock.planHash || '',
+        codeDiffHash: '',
+        updatedAt: new Date().toISOString(),
+      },
+      REPO_ROOT
+    );
+  } else {
+    fs.writeFileSync(
+      FEEDBACK_FILE,
+      `STATUS: PENDING (Task: ${taskId})\n`,
+      'utf8'
+    );
+    saveStateLock(
+      {
+        taskId,
+        planHash: '',
+        codeDiffHash: '',
+        updatedAt: new Date().toISOString(),
+      },
+      REPO_ROOT
+    );
+  }
+
   // 2. Kết nối vào trình duyệt Chrome đang mở qua CDP port 9222
   const browser = await chromium.connectOverCDP(cdpUrl);
 
@@ -1935,6 +2010,18 @@ async function main() {
           : 'REJECTED';
       const normalizedCodeReview = `CODE_STATUS: ${effectiveStatus}\n\n${cleanedBody}\n`;
       fs.writeFileSync(CODE_REVIEW_FILE, normalizedCodeReview, 'utf8');
+      if (effectiveStatus === 'APPROVED') {
+        const latestLock = loadStateLock(REPO_ROOT);
+        saveStateLock(
+          {
+            taskId,
+            planHash: latestLock.planHash || computePlanHash(REPO_ROOT),
+            codeDiffHash: computeCodeDiffHash(REPO_ROOT, REVIEW_SCOPE),
+            updatedAt: new Date().toISOString(),
+          },
+          REPO_ROOT
+        );
+      }
       console.log(`CODE_STATUS: ${effectiveStatus}`);
     } else if (mode === 'rescue') {
       const normalizedRescue = [
@@ -1952,6 +2039,17 @@ async function main() {
         .trim();
       const normalizedFeedback = `STATUS: ${status}\n\n${cleanedBody}\n`;
       fs.writeFileSync(FEEDBACK_FILE, normalizedFeedback, 'utf8');
+      if (status === 'APPROVED') {
+        saveStateLock(
+          {
+            taskId,
+            planHash: computePlanHash(REPO_ROOT),
+            codeDiffHash: '',
+            updatedAt: new Date().toISOString(),
+          },
+          REPO_ROOT
+        );
+      }
       console.log(`STATUS: ${status}`);
     }
   } finally {
