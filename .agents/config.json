@@ -1,5 +1,5 @@
 {
-  "projectName": "AI-WORKSPACE",
+  "projectName": "",
   "cdpUrl": "http://127.0.0.1:9222",
   "geminiCdpUrl": "http://127.0.0.1:9223",
   "sourceDirs": [
@@ -7,6 +7,19 @@
     "tests"
   ],
   "testCommand": "npm test",
-  "maxReviewRounds": 2,
+  "maxReviewRounds": {
+    "chatgpt": {
+      "plan": 3,
+      "review-code": 2,
+      "rescue": 2
+    },
+    "gemini": {
+      "plan": 2,
+      "review-code": 2,
+      "rescue": 2
+    }
+  },
+  "geminiGemUrl": "",
+  "dualMentorPolicy": "chatgpt-gate",
   "useGptMention": true
 }
