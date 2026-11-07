@@ -1,6 +1,7 @@
 {
   "projectName": "AI-WORKSPACE",
   "cdpUrl": "http://127.0.0.1:9222",
+  "geminiCdpUrl": "http://127.0.0.1:9223",
   "sourceDirs": [
     "src",
     "tests"

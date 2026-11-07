@@ -3,4 +3,5 @@ node_modules/
 tasks.json
 *_bundle.txt
 .*.tmp
+*.patch
 .agents/state/checkpoint.patch
