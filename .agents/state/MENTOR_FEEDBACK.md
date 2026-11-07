@@ -1,25 +1,30 @@
 STATUS: REJECTED
 
-RPIR — Technical Design Review v1.1
-
-Dự án: AI_WORK-FLOW — Level 1.2 Integrity & Security Hardening
-Phạm vi: Task 4–Task 7
-Chuyên gia: Software System Architect + DevOps, Reliability & Cost Engineer
-
+RPIR — Technical Design Review v1.2
 Design Gate: REJECTED
-Revision v1.1
-Implementation: HOLD
-1. Kết luận tổng quan
+Task 4 / 7
+Architect + DevOps
 
-Bản v1.1 đã xử lý tốt phần lớn phản biện ở vòng 1. Đặc biệt, các thay đổi về Mandatory Footer, Strict Migration, FSM, Read-Only Git Snapshot và phân biệt hai tầng bảo mật là những cải tiến đúng hướng.
+Quyết định: Chưa cấp quyền triển khai Task 4. Bản v1.2 đã giải quyết đáng kể các vấn đề từ hai vòng review trước, nhưng vẫn còn những mâu thuẫn ảnh hưởng trực tiếp đến tính hợp lệ của phê duyệt và quá trình nâng cấp Guard.
 
-Tuy nhiên, chưa thể phê duyệt triển khai vì còn các vấn đề ảnh hưởng trực tiếp đến tính đúng đắn của quy trình Git, quyền phê duyệt và khả năng vận hành liên tục qua Task 4–7.
+Đánh giá này dựa trên nội dung CURRENT_PLAN.md v1.2 được cung cấp, chưa bao gồm kiểm chứng mã nguồn thực tế.
+
+1. Kết quả đánh giá tổng quan
 
 Hạng mục
 
 	
 
 Đánh giá
+
+
+
+
+Per-task RPIR & Active Task
+
+	
+
+Đạt về kiến trúc
 
 
 
@@ -33,631 +38,467 @@ Mandatory Approval Footer
 
 
 
-Legacy Lock Migration
+Legacy Migration
 
 	
 
-Đạt về định hướng
+Còn rủi ro tái cấp phê duyệt
 
 
 
 
-FSM & Task Binding
-
-	
-
-Cần sửa hợp đồng
-
-
-
-
-TOCTOU Transaction
+Transaction Journal
 
 	
 
-Chưa bảo đảm nhất quán đầy đủ
+Mâu thuẫn trạng thái
 
 
 
 
-Deterministic Git Snapshot
-
-	
-
-Có lỗi logic chặn triển khai
-
-
-
-
-Three-Zone Scope Policy
+3-Mode Git Snapshot
 
 	
 
-Cần thống nhất
+Cần bổ sung hợp đồng
 
 
 
 
-Independent CI Verification
-
-	
-
-Chưa có ranh giới tin cậy thực chất
-
-
-
-
-Rollback & Recovery
+Trusted CI & Tier 2
 
 	
 
-Cần bổ sung
+Đã giới hạn phạm vi phù hợp
 
 
 
 
-21 Regression Tests
+Dual-Path Protection
 
 	
 
-Tốt nhưng thiếu trường hợp quyết định
+Đúng hướng
 
-2. Các lỗi P0 bắt buộc sửa
-P0-08 — Mâu thuẫn giữa Snapshot lúc pre-commit và Snapshot lúc CI
-Critical — Architectural Blocker
 
-Đây là lỗi nghiêm trọng nhất còn lại của bản v1.1.
 
-Kế hoạch quy định:
 
-Bash
-git rev-parse --verify HEAD
+Bootstrap v1.1 → v1.2
 
-để xác định baseCommitOid, rồi lấy các file thay đổi so với HEAD làm đầu vào cho codeSnapshotHash.
+	
 
-Cách này hợp lý khi thực hiện review trước commit, nhưng không thể tái sử dụng nguyên trạng sau commit.
+Chưa an toàn
 
-Ví dụ:
 
-Lúc Mentor review
 
-HEAD = A
 
-Snapshot được duyệt
+31 Adversarial Tests
 
-Base A → Working Tree B
+	
 
-Hash = H(A, B)
+Thiếu kiểm thử vòng đời
 
-Sau khi tạo commit B
+2. Các lỗi P0 bắt buộc khắc phục
+P0-13 — transactionId dùng chung làm mất hiệu lực Plan Approval sau Code Review
+Critical
 
-HEAD = B
+Đây là lỗi logic rõ nhất trong bản v1.2.
 
-CI tính lại theo HEAD mới
+Theo mục 3.1.3, STATE_LOCK.json chỉ có một transactionId, trong khi cả hai footer đều phải khớp với lock.transactionId.
 
-Base B → Working Tree B
+Giả sử Task 4 được duyệt kế hoạch và sau đó được duyệt mã nguồn:
 
-Hash = H(B, B) ≠ H(A, B)
+Bước 1 — Plan Approved
 
-Hậu quả: --ci-verify có thể từ chối chính commit hợp lệ vừa được Mentor duyệt.
+STATE_LOCK.transactionId = tx-A
+
+PLAN_SHA256 footer TX = tx-A
+
+verifyPlanGuard() PASS
+
+Bước 2 — Code Approved
+
+STATE_LOCK.transactionId = tx-B
+
+CODE_SHA256 footer TX = tx-B
+
+PLAN_SHA256 footer TX vẫn là tx-A
+
+verifyPlanGuard() FAIL
+
+Nếu verifyPreCommitGuard() yêu cầu Plan Approval vẫn hợp lệ, hệ thống có nguy cơ tự chặn commit ngay sau khi duyệt code.
+
+Yêu cầu sửa: Tách biệt transaction identifier của từng loại phê duyệt:
+
+JSON
+{
+  "planApprovalTxId": "tx-plan-...",
+  "codeApprovalTxId": "tx-code-..."
+}
+
+verifyPlanGuard() chỉ so sánh footer kế hoạch với planApprovalTxId. verifyPreCommitGuard() kiểm tra cả hai giao dịch tương ứng.
+
+Không được dùng một transaction ID toàn cục thay thế cả lịch sử phê duyệt kế hoạch lẫn mã nguồn.
+
+Ngoài ra, phải quy định rõ việc bắt đầu Code Review không làm mất quyền PLAN_APPROVED, còn việc sửa kế hoạch phải vô hiệu hóa cả hai phê duyệt.
+
+P0-14 — Bootstrap có thể tự tạo lại bằng chứng phê duyệt không được Mentor xác nhận
+Critical — Approval Integrity
+
+Trong mục 3.4.1, lệnh --bootstrap-v12 được phép:
+
+Đọc MENTOR_FEEDBACK.md và thấy STATUS: APPROVED.
+
+Tính hash từ CURRENT_PLAN.md hiện tại.
+
+Sinh planReviewRequestId và transactionId mới.
+
+Ghi footer mới và chuyển lock sang PLAN_APPROVED.
+
+Điều này không chứng minh nội dung CURRENT_PLAN.md hiện tại chính là nội dung được Mentor duyệt.
+
+Ví dụ: kế hoạch A được duyệt dưới Guard v1.1. Sau đó Worker sửa kế hoạch thành B rồi chạy bootstrap. Nếu bootstrap chỉ kiểm tra dòng STATUS: APPROVED, nó có thể tạo footer cho B dù Mentor chưa từng duyệt B.
+
+Đó chính là dạng sai lệch approval mà Level 1.2 cần loại bỏ.
 
 Yêu cầu sửa:
 
-Định nghĩa ba chế độ snapshot độc lập:
+Bootstrap phải xác minh hash, task ID và bằng chứng phê duyệt v1.1 đã tồn tại trước migration.
 
-Mode
+Nếu không có bằng chứng ràng buộc nội dung kế hoạch với lần phê duyệt trước, chỉ được chuyển sang PENDING.
 
-	
+Không được tự tạo planReviewRequestId rồi coi đó là ID của một yêu cầu đã được Mentor duyệt.
 
-So sánh
+Phải giữ provenance của approval cũ; không được tái tạo bằng chứng lịch sử bằng cách ký lại nội dung hiện tại.
 
-	
+Nếu muốn nâng lên PLAN_APPROVED sau migration, phải có một lần xác nhận phê duyệt thực sự theo hợp đồng mới.
 
-Mục đích
+Quy tắc bắt buộc: Migration có thể chuyển đổi dữ liệu, nhưng không được tự nâng mức độ tin cậy của dữ liệu.
 
+P0-15 — Chuyển Task 4 → Task 5 có nguy cơ chặn chính commit hoàn thành Task 4
+High — Workflow Deadlock
 
+Mục 3.1.2 quy định activeTaskId phải trùng với task [ ] đầu tiên trong ROADMAP.md.
 
+Giả sử Worker hoàn thành Task 4 và chuẩn bị commit:
 
-worktree
+CURRENT_PLAN.md vẫn ghi Active Task: task-4.
 
-	
+STATE_LOCK.json vẫn ghi taskId: task-4.
 
-baseCommitOid → Working Tree
+Worker đánh dấu [x] Task 4 trong ROADMAP.md.
 
-	
+Task chưa hoàn thành đầu tiên trở thành task-5.
 
-Snapshot gửi Mentor
+Khi pre-commit đọc trạng thái Working Tree, nó có thể phát hiện TASK_ID_MISMATCH và chặn commit Task 4 đã được phê duyệt.
 
+Yêu cầu sửa: Tách biệt hai thao tác:
 
+Hoàn tất Task 4: Code Review Gate kiểm chứng và commit snapshot của Task 4 trong khi activeTaskId vẫn là task-4.
 
+Chuyển sang Task 5: Sau khi commit thành công, thực hiện một governance transition riêng để cập nhật ROADMAP.md, CURRENT_PLAN.md và reset approval cho task mới.
 
-index
+Governance transition phải có hợp đồng riêng, không được tái sử dụng Plan Approval của Task 4 để cấp quyền sửa mã nguồn Task 5.
 
-	
+Bổ sung kiểm thử cho cả pre-commit hợp lệ của Task 4 và chuyển task sau commit, thay vì chỉ kiểm thử từ chối sử dụng lock cũ như G-26 hiện tại.
 
-baseCommitOid → Git Index
+P0-16 — Task 4 phụ thuộc vào thuật toán Code Snapshot dự kiến chỉ triển khai ở Task 5
+Critical — Task Dependency
 
-	
+Theo kế hoạch:
 
-Pre-commit
+Task 4 triển khai schema v1.2, codeSnapshotHash, baseCommitOid, Code Review Footer và FSM.
 
+Task 5 mới triển khai đầy đủ captureCodeSnapshot() với ba mode.
 
+Tuy nhiên, Task 4 vẫn phải vượt qua Code Review và pre-commit trước khi được đánh dấu hoàn thành.
 
+Câu hỏi kiến trúc chưa được giải quyết trong kế hoạch là:
 
-commit
+Task 4 sẽ dùng thuật toán nào để chứng minh mã nguồn được commit chính là mã nguồn đã được review, khi thuật toán snapshot v1.2 chưa tồn tại đầy đủ?
 
-	
-
-baseCommitOid → Commit Tree
-
-	
-
-Independent CI
-
-Bổ sung baseCommitOid vào dữ liệu phê duyệt và ràng buộc như sau:
-
-Ở worktree: lấy base tại thời điểm Capture.
-
-Ở index: bắt buộc HEAD === baseCommitOid; nếu HEAD đã đổi thì hủy quyền commit hoặc yêu cầu review lại.
-
-Ở commit: dùng base đã khóa, không lấy HEAD mới làm base.
-
-CI phải so sánh nội dung commit được kiểm tra với snapshot đã duyệt, không so với trạng thái Working Tree trên runner.
-
-Đối với merge commit, squash merge hoặc rebase, phải quy định cách xử lý riêng. Khuyến nghị ở Level 1.2: xác minh commit ứng viên trước khi merge, yêu cầu base phù hợp và từ chối các trường hợp lịch sử thay đổi mà chưa xác minh lại.
-
-Acceptance Criteria mới: Cùng một thay đổi hợp lệ phải tạo ra cùng codeSnapshotHash ở cả ba mode worktree, index và commit.
-
-P0-09 — CI chưa độc lập nếu Worker có thể sửa chính bộ kiểm chứng
-Critical — Trust Boundary
-
-Kế hoạch đề xuất chạy:
-
-Bash
-node .agents/scripts/verify_guard.mjs --ci-verify
-
-trên GitHub Actions.
-
-Tuy nhiên, Task 4–6 đang trực tiếp thay đổi verify_guard.mjs. Nếu CI checkout mã nguồn PR rồi chạy phiên bản script nằm trong chính PR, Worker có thể sửa script để luôn trả về exit code 0.
-
-Khi đó, CI chạy trên máy khác nhưng logic kiểm chứng vẫn do Worker kiểm soát.
-
-Yêu cầu sửa:
-
-Bộ CI verification đáng tin cậy phải được lấy từ protected baseline, workflow được bảo vệ hoặc nguồn riêng mà Worker không thể tự thay đổi.
-
-Mã nguồn PR được coi là dữ liệu cần kiểm chứng, không phải nguồn chính sách đáng tin cậy.
-
-Các thay đổi đối với chính verifier cần có cơ chế cập nhật, kiểm thử và phê duyệt riêng.
-
-Required status checks và branch protection phải được cấu hình sao cho Worker không thể tự vô hiệu hóa. Có thể dùng required reviewer/CODEOWNERS và giới hạn quyền bypass phù hợp.
-
-GitHub hỗ trợ required reviews và required status checks, nhưng việc bật chúng phải đi kèm cấu hình quyền thực tế. 
-GitHub Docs
-+1
-
-Đặc biệt, CI không thể xem STATE_LOCK.json và footer trong cùng PR là bằng chứng độc lập về nguồn phê duyệt. Worker vẫn có thể sửa cả hai cho khớp nhau.
-
-Phải có nguồn xác nhận approval nằm ngoài quyền tự ghi của Worker nếu muốn đạt Tier 2. Ví dụ: một approval record do hệ thống tin cậy quản lý, gắn với task, request và snapshot hash; hoặc một quy trình reviewer độc lập trên GitHub được kiểm soát quyền.
-
-Nếu chưa triển khai được tầng này trong Task 4–7, phải ghi rõ Tier 2 là chưa được nghiệm thu, không tuyên bố hoàn thành Independent Verification.
-
-P0-10 — Xác định activeTaskId có thể làm khóa toàn bộ Task 5–7
-High — State Machine Deadlock
-
-Trong mục 3.2.2, kế hoạch quy định xác định task hiện hành từ tiêu đề CURRENT_PLAN.md và task chưa hoàn thành đầu tiên trong ROADMAP.md.
-
-Nhưng tài liệu hiện tại có tiêu đề chung:
+Đặc biệt, Task 4 đang sửa các file bảo mật quan trọng:
 
 Văn bản thuần túy
-... (TASK 4 – TASK 7)
+.agents/scripts/verify_guard.mjs
+.agents/scripts/ask_mentor.mjs
+.agents/scripts/init_project.mjs
+.agents/scripts/checkpoint.mjs
 
-Sau khi Task 4 hoàn thành:
+Những file này phải được đưa vào snapshot được review, không chỉ xuất hiện trong allowedPaths.
 
-ROADMAP.md chuyển sang Task 5.
+Yêu cầu sửa: Chọn một trong hai phương án nhất quán:
 
-CURRENT_PLAN.md vẫn là kế hoạch Task 4–7.
+Phương án A — Khuyến nghị: Task 4 triển khai lõi snapshot tối thiểu đủ hỗ trợ worktree và index, bao gồm file hạ tầng được ủy quyền. Task 5 mở rộng và hoàn thiện commit mode cùng các trường hợp Git phức tạp.
 
-STATE_LOCK.json có thể vẫn mang task-4.
+Phương án B: Xây dựng một quy trình bootstrap commit riêng, được phê duyệt tường minh cho giai đoạn chuyển tiếp, trong đó phiên bản Guard tin cậy hiện hữu kiểm chứng mã nguồn Task 4 trước khi kích hoạt cơ chế mới.
 
-verifyPlanGuard() phát hiện mâu thuẫn và trả về ok: false.
+Không được ghi CODE_APPROVED với hash kiểu cũ nhưng đặt tên là codeSnapshotHash, cũng không được bỏ kiểm tra snapshot vì Task 4 là maintenance task.
 
-Ngoài ra, cơ chế cấp quyền hiện tại cho phép allowedPaths của Task 4 bao gồm cả file thuộc Task 5–7. Điều này làm mờ ranh giới phê duyệt theo từng task.
+3. Các vấn đề P1 cần bổ sung
 
-Yêu cầu sửa:
+ID
 
-Quy định một nguồn xác định activeTaskId duy nhất, có thể là tham số CLI được điều phối kiểm soát, kết hợp metadata có cấu trúc.
+	
 
-Đề xuất hợp đồng:
+Vấn đề
 
-Văn bản thuần túy
-Phase Plan: Level 1.2
-Active Task: task-4
-Approved Scope: task-4 only
-Approval Revision: v1.1
+	
 
-Mỗi lần chuyển task phải có quy trình chuyển trạng thái rõ ràng.
+Yêu cầu chỉnh sửa
 
-Nếu muốn phê duyệt một lần cho cả Task 4–7, cần thiết kế cơ chế phê duyệt đa task riêng.
 
-Nếu tuân thủ RPIR theo từng task, mỗi task phải có plan approval và code review độc lập.
 
-Khuyến nghị: Giữ RPIR per-task. Kế hoạch tổng thể Level 1.2 chỉ là tài liệu định hướng; CURRENT_PLAN.md dùng để xác định phạm vi thực thi của task hiện hành.
 
-P0-11 — Symlink nằm bên trong repo vẫn có thể vượt qua chính sách Protected Infrastructure
-High — Path Authorization Bypass
+P1-15
 
-Mục 3.4.1 đã bổ sung realpathSync.native, nhưng quy tắc được mô tả chỉ chặn khi đường dẫn thực tế nằm ngoài repository.
+	
 
-Ví dụ:
+Footer có thể có một dòng hợp lệ và một dòng sai cú pháp không khớp regex
 
-Văn bản thuần túy
-repo/
-├── src/
-│   └── internal-link -> ../.agents/scripts/
-└── .agents/
-    └── scripts/
-        └── verify_guard.mjs
+	
 
-Worker yêu cầu ghi:
+Quét mọi footer mang nhãn PLAN_SHA256 hoặc CODE_SHA256; chỉ chấp nhận đúng một footer, đúng cú pháp và đúng vị trí
 
-Văn bản thuần túy
-src/internal-link/verify_guard.mjs
 
-Đường dẫn theo tên nằm trong src/, nhưng đường dẫn thực tế trỏ vào .agents/scripts/.
 
-Nếu chỉ kiểm tra realTarget vẫn thuộc repository, thao tác này có thể được cho phép dù đang sửa hạ tầng được bảo vệ.
 
-Yêu cầu sửa:
+P1-16
 
-Phải áp dụng authorization trên cả hai đường dẫn:
+	
 
-Đường dẫn logic ban đầu.
+allowedPaths và reviewScope chưa có quy tắc hợp nhất đầy đủ cho maintenance task
 
-Đường dẫn đích thực tế sau khi giải quyết symlink.
+	
 
-Cả hai phải được cho phép. Nếu một trong hai thuộc vùng cấm thì từ chối thao tác.
+Mọi file hạ tầng được phép sửa phải nằm trong snapshot, review bundle và commit verification
 
-Bổ sung xử lý đường dẫn chưa tồn tại, symlink bị hỏng, ghi qua đường dẫn cha và trường hợp thay thế file bằng rename. Chặn truy cập .git/ thông qua tool ghi file.
 
-Lưu ý: kiểm tra bằng realpathSync vẫn có race condition nếu một tiến trình khác đổi symlink sau kiểm tra. Điều này phải nằm trong giới hạn Tier 1 đã tuyên bố.
 
-P0-12 — Chưa có quy trình Bootstrap/Migration để nâng cấp chính Guard
-High — Deployment Blocker
 
-Task 4 trực tiếp thay đổi verify_guard.mjs, ask_mentor.mjs và init_project.mjs.
+P1-17
 
-Trong khi đó, mã mới quy định:
+	
 
-Legacy lock bị từ chối.
+--trusted-verifier là cờ CLI, không tự tạo trust boundary
 
-Trạng thái PENDING không cho sửa protected infrastructure.
+	
 
-Việc migration có thể đưa approval về PENDING.
+Xác minh nguồn verifier tại CI bằng cấu hình độc lập; không xem việc truyền cờ là bằng chứng đáng tin cậy
 
-Điều này có thể tạo ra tình huống hệ thống tự khóa ngay giữa quá trình nâng cấp.
 
-Yêu cầu sửa:
 
-Bổ sung quy trình bootstrap có quyền kiểm soát riêng:
 
-Kiểm tra backup và baseline của Level 1.1.
+P1-18
 
-Chuẩn bị bản nâng cấp trong môi trường hoặc worktree cô lập.
+	
 
-Chạy kiểm thử migration và Guard mới.
+Backup .agents/backups/ vẫn nằm trong repository
 
-Kích hoạt verifier/hook mới theo một bước chuyển đổi được kiểm soát.
+	
 
-Chỉ hoàn tất khi toàn bộ kiểm thử và kiểm tra trạng thái đạt yêu cầu.
+Cần làm rõ phạm vi chịu lỗi; nếu yêu cầu phục hồi sau mất hoặc hỏng repo, cần thêm backup ngoài repository
 
-Nếu bước nâng cấp thất bại, phải còn đường phục hồi bằng phiên bản Guard tin cậy trước đó.
 
-Không dùng ngoại lệ tự đặt biến môi trường để giải quyết tình trạng này.
 
-3. Các vấn đề P1 còn lại
-P1-09 — Hai lần renameSync() không tạo thành một giao dịch nguyên tử
 
-Kế hoạch gọi Phase 4 là Atomic Approval Write, nhưng đang thực hiện lần lượt:
+P1-19
 
-Rename feedback.
+	
 
-Rename STATE_LOCK.json.
+git write-tree không sao lưu toàn bộ trạng thái Git Index
 
-Mỗi rename có thể nguyên tử trên filesystem phù hợp, nhưng hai lần rename không tạo thành một transaction nguyên tử chung.
+	
 
-Nếu chương trình dừng giữa hai bước, feedback và lock có thể không đồng bộ.
+Bổ sung cách bảo toàn staging, untracked files và các metadata cần thiết
 
-Cần bổ sung transactionId, cơ chế phát hiện trạng thái ghi dở và recovery fail-closed. Nên xác định một bản ghi trạng thái có thẩm quyền, sử dụng temp file cùng filesystem và xác minh toàn bộ quan hệ feedback–lock trước khi coi approval hợp lệ.
 
-P1-10 — git status --porcelain=v1 -z chưa đặc tả đầy đủ việc parse rename
 
-Git documentation quy định bản ghi rename trong chế độ -z có hai đường dẫn, với thứ tự khác dạng hiển thị thông thường. 
-git-status Documentation
 
-Thuật toán hiện tại chưa chỉ rõ cách chuyển rename thành manifest.
+P1-20
 
-Đề xuất chuẩn hóa rename thành cặp thay đổi đường dẫn tương đương Delete + Add khi so sánh cây cuối cùng, thay vì phụ thuộc vào ngưỡng phát hiện rename của Git.
+	
 
-Bổ sung kiểm thử rename, tên file chứa ký tự đặc biệt và trường hợp đường dẫn di chuyển ra/vào reviewScope.
+reviewBundleHash được khai báo nhưng chưa quy định đầy đủ cách xác minh
 
-P1-11 — git hash-object --path không bảo đảm mọi clean filter đều tất định
+	
 
-Việc sử dụng:
+Ràng buộc đúng bytes của bundle đã gửi Mentor, phát hiện thiếu file, truncation và hash lệch
 
-Bash
-git hash-object --stdin --path="<relPath>"
 
-là hướng đi đúng. Git xác nhận --path áp dụng các filter tương ứng, còn -w mới yêu cầu ghi đối tượng vào object database. 
+
+
+P1-21
+
+	
+
+Kiểm tra tất định của clean filters chưa đầy đủ
+
+	
+
+Khóa policy/config liên quan hoặc từ chối khi không thể bảo đảm snapshot và Index tương đương
+
+Lưu ý về Git Index Backup
+
+git write-tree tạo tree object từ Git Index và yêu cầu Index ở trạng thái đã merge hoàn chỉnh. Nó không phải bản sao tuần tự hóa đầy đủ của .git/index. 
+git-write-tree Documentation
+
+Do đó, index.tree chỉ nên được xem là một thành phần của backup. Nó không đủ để phục hồi chính xác mọi trạng thái staging, intent-to-add hay untracked files.
+
+Tương tự, git hash-object --stdin --path là lựa chọn hợp lý để áp dụng Git filters trước khi tính blob OID, nhưng cần kiểm tra exit code và xác minh kết quả với Index. 
 git-hash-object Documentation
 
-Tuy nhiên, một external clean filter có thể không tất định hoặc có tác dụng phụ. Vì vậy không nên tuyên bố lệnh này bảo đảm tuyệt đối cùng kết quả với git add trong mọi cấu hình.
+4. Kiểm thử bổ sung bắt buộc
 
-Cần bổ sung:
-
-Kiểm tra thất bại của filter và chính sách đối với filter không được hỗ trợ.
-
-Chặn khi blob tính lại không bằng Git Index.
-
-Xử lý Git SHA-1 và SHA-256 repository: Git blob OID không mặc nhiên là SHA-256, dù manifest cuối cùng được băm SHA-256.
-
-Phân biệt đọc trạng thái Git với bảo đảm không có tác dụng phụ từ filter bên ngoài.
-
-P1-12 — Code Review phải gắn với chính xác nội dung gửi Mentor
-
-postTestSnapshot.hash đúng không đồng nghĩa nội dung mà Mentor nhận được là đầy đủ.
-
-Hợp đồng cần quy định gói review tối thiểu có mã nguồn/diff tương ứng, đầy đủ file mới, file xóa, metadata, kết quả test và hash. Không được xem hash đơn lẻ là bằng chứng Mentor đã xem nội dung.
-
-Nếu payload bị cắt bớt, có lỗi đọc file hoặc thiếu dữ liệu quan trọng thì không cấp CODE_APPROVED.
-
-P1-13 — Rollback chưa bảo đảm khả năng phục hồi như mô tả
-
-Bản v1.1 đã an toàn hơn đáng kể khi loại bỏ reset --hard mặc định.
-
-Tuy nhiên, thư mục os.tmpdir() chưa phù hợp làm nơi lưu checkpoint cần tồn tại qua reboot hoặc cleanup.
-
-Việc chỉ đọc lại SESSION_MAP.json và worktree.patch cũng chưa đủ chứng minh toàn bộ backup chính xác.
-
-Cần bổ sung manifest SHA-256 cho các file backup, bảo vệ quyền truy cập, sao lưu Git Index/staged state khi cần và quy trình thử phục hồi. Không dùng cụm từ Non-Destructive Recovery như một bảo đảm tuyệt đối: git restore vẫn thay thế nội dung của file được chỉ định, còn git revert có thể xảy ra conflict.
-
-P1-14 — Acceptance Criteria của npm test chưa nhất quán
-
-Theo HANDOFF, bộ fs_fault.test.js trước đó có 7 PASS và 1 SKIP hợp lệ.
-
-Vì vậy, yêu cầu 100% PASS cần được diễn đạt rõ:
-
-0 FAIL.
-
-exitCode === 0.
-
-Các SKIP phải được thống kê và có lý do.
-
-21 trường hợp Guard bắt buộc phải thực thi và PASS, không được tính SKIP là PASS.
-
-4. Bộ kiểm thử cần bổ sung
-
-21 test G-1 đến G-21 nên được giữ lại. Tôi đề xuất thêm các trường hợp tập trung vào những lỗi vừa phát hiện.
+Giữ nguyên G-1 đến G-31. Bổ sung năm kiểm thử tập trung vào lỗi mới thay vì mở rộng không cần thiết sang các subsystem khác.
 
 Test
 
 	
 
-Kịch bản
+Task
 
 	
 
-Kết quả
-
-
-
-
-G-22
+Nội dung
 
 	
 
-Snapshot worktree, index, commit cùng nội dung đã duyệt
+Kỳ vọng
+
+
+
+
+G-32
 
 	
 
-Hash bằng nhau
-
-
-
-
-G-23
+4
 
 	
 
-HEAD thay đổi sau code review nhưng trước commit
+Plan Approval tx-A, sau đó Code Approval tx-B
 
 	
 
-REJECT
+Cả hai footer vẫn hợp lệ và pre-commit PASS
 
 
 
 
-G-24
-
-	
-
-CI sử dụng base mới thay vì baseCommitOid đã khóa
+G-33
 
 	
 
-REJECT
-
-
-
-
-G-25
+4
 
 	
 
-Worker thay verifier trong PR để trả exit 0
+Sửa kế hoạch A thành B trước bootstrap, feedback cũ vẫn APPROVED
 
 	
 
-Trusted CI không chấp nhận
+Không cấp PLAN_APPROVED cho B
 
 
 
 
-G-26
-
-	
-
-Hoàn thành Task 4, chuyển Task 5 trong RPIR
+G-34
 
 	
 
-Task binding đúng, approval cũ không được tái sử dụng sai
-
-
-
-
-G-27
+4
 
 	
 
-Symlink trong src/ trỏ vào .agents/scripts/
+Đánh dấu Task 4 hoàn thành và chuyển sang Task 5
 
 	
 
-REJECT
+Commit Task 4 hợp lệ, transition riêng thành công, approval Task 4 không dùng lại được
 
 
 
 
-G-28
-
-	
-
-Process dừng giữa hai lần ghi feedback và lock
+G-35
 
 	
 
-FAIL-CLOSED, recovery an toàn
-
-
-
-
-G-29
+4
 
 	
 
-Rename file và di chuyển file qua ranh giới scope
+Task 4 sửa verify_guard.mjs, ask_mentor.mjs và test được ủy quyền
 
 	
 
-Manifest chính xác
+Mọi file xuất hiện trong snapshot và bundle, staged mismatch bị chặn
 
 
 
 
-G-30
-
-	
-
-Nâng cấp từ legacy Guard khi lock cũ chưa hợp lệ
+G-36
 
 	
 
-Bootstrap và rollback hoạt động
-
-
-
-
-G-31
+4
 
 	
 
-Git clean filter tạo blob khác snapshot đã duyệt
+Bootstrap có legacy approval thiếu chứng cứ hash tương ứng với plan hiện hành
 
 	
 
-REJECT
+Chỉ được migration sang PENDING, không tự cấp approval
 
-Với G-25, kiểm thử unit/mock chỉ xác minh thuật toán. Việc công nhận Tier 2 còn cần kiểm tra cấu hình CI, quyền truy cập và branch protection thực tế.
+Bên cạnh các test trên, G-30 cần phân biệt hai tình huống: migration có bằng chứng phê duyệt hợp lệ và migration không đủ bằng chứng. Không được đặt kỳ vọng thành công nâng lên PLAN_APPROVED cho cả hai.
 
-5. Hướng sửa đổi tối thiểu — Không cần thiết kế lại toàn bộ
+5. Phương án sửa v1.3 tối thiểu
 
-Không cần mở rộng roadmap hoặc bổ sung framework mới. Chỉ cần hoàn thiện bốn hợp đồng cốt lõi:
+Không cần thiết kế lại toàn bộ kiến trúc hoặc mở thêm task. Để tránh kéo dài vòng review, tôi khuyến nghị sửa đúng bốn hợp đồng trước khi triển khai:
 
-Snapshot Contract v1.2
+Approval Transaction Contract
 
-Bổ sung commit mode, cố định baseCommitOid, quy định canonical representation thống nhất và không phụ thuộc HEAD mới.
+Tách planApprovalTxId và codeApprovalTxId; giữ quan hệ hash, request ID và trạng thái độc lập cho từng phê duyệt.
 
-Independent CI Contract
+Verified Migration Contract
 
-Verifier và nguồn phê duyệt tin cậy nằm ngoài quyền sửa đổi của Worker; phân biệt CI simulation với enforcement thực tế.
+Bootstrap không tự sinh bằng chứng Mentor approval. Legacy approval thiếu căn cứ phải được chuyển về PENDING.
 
-Task & Authorization Contract
+Per-Task Lifecycle Contract
 
-Xác định task hiện hành tất định, approval theo task, đường dẫn thực tế sau symlink và phạm vi bảo trì.
+Phân biệt commit hoàn thành Task 4 với governance transition sang Task 5.
 
-Migration & Recovery Contract
+Transitional Snapshot Contract
 
-Bootstrap có kiểm soát, phát hiện ghi dở, backup có thể xác minh và rollback không phụ thuộc vào Guard đang lỗi.
+Task 4 có cơ chế review và khóa đầy đủ các file đã sửa trước khi Task 5 hoàn thiện thuật toán ba mode.
 
-6. Quyết định RPIR cuối cùng
+Các điểm P1 còn lại cần được bổ sung thành quy tắc triển khai hoặc acceptance criteria rõ ràng. Không cần thay đổi những thiết kế đã đúng như UTF-8 byte ordering, immutable state file protection, fixed baseCommitOid, hay giới hạn Tier 1/Tier 2.
 
-Gate
+6. Quyết định cuối cùng của ChatGPT Mentor
 
-	
-
-Quyết định
-
-
-
-
-Design Gate v1.1
-
-	
+Design Gate v1.2
 
 REJECTED
 
+Task 4 Implementation
 
+NOT AUTHORIZED
 
+Task 5–7
 
-Cho phép chỉnh sửa CURRENT_PLAN.md
+HOLD
 
-	
+Bước tiếp theo
 
-YES
+CURRENT_PLAN.md v1.3
 
+Chỉ đạo gửi lại Worker Antigravity
 
+Mentor Review Handoff
 
+Sao chép
 
-Cho phép triển khai Task 4
+Giữ nguyên mã nguồn. Chỉ sửa CURRENT_PLAN.md để giải quyết P0-13 đến P0-16, bổ sung các điều kiện P1-15 đến P1-21 và kiểm thử G-32 đến G-36. Sau đó trình lại Design Gate. Không tự chuyển sang Implement.
 
-	
-
-NO
-
-
-
-
-Cho phép chuyển Task 5–7
-
-	
-
-NO
-
-
-
-
-Yêu cầu vòng review tiếp theo
-
-	
-
-Bản v1.2
-
-Chỉ đạo cho Worker Antigravity:
-
-Giữ nguyên mã nguồn. Chỉnh sửa CURRENT_PLAN.md thành bản v1.2, tập trung khắc phục bốn lỗi P0-08 đến P0-11 và P0-12 về quy trình bootstrap, cùng các lỗi P1-09 đến P1-14. Bổ sung các kiểm thử G-22 đến G-31 vào acceptance criteria. Không cần thay đổi các phần v1.1 đã được đánh giá đạt yêu cầu.
-
-Khi gửi lại, cần mô tả rõ cơ chế so sánh worktree → index → commit, cách xác thực nguồn approval trong CI và cách nâng cấp chính Guard mà không tự khóa hệ thống.
-
-Kết luận: Bản v1.1 tiến bộ rõ rệt so với vòng 1, nhưng chỉ nên được thông qua khi chứng minh được rằng commit thực tế chính là snapshot đã review, CI không phụ thuộc vào verifier do Worker kiểm soát, và các task có thể chuyển tiếp mà không làm sai lệch quyền phê duyệt.
+Kết luận kiến trúc: Bản v1.2 đã tiến gần đến mức có thể triển khai. Bốn điểm chặn hiện tại tập trung vào một vấn đề chung: quyền phê duyệt phải tồn tại nhất quán từ khi lập kế hoạch, qua migration, review code, commit và chuyển sang task tiếp theo. Khi các vòng đời này không còn mâu thuẫn, Task 4 có thể được phê duyệt mà không cần mở rộng thêm kiến trúc.
