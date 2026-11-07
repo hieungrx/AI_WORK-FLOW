@@ -5,7 +5,8 @@
   "scripts": {
     "test": "node src/todo.test.js && node tests/fs_fault.test.js",
     "ask-mentor": "node .agents/scripts/ask_mentor.mjs",
-    "init-workflow": "node .agents/scripts/init_project.mjs"
+    "init-workflow": "node .agents/scripts/init_project.mjs",
+    "checkpoint": "node .agents/scripts/checkpoint.mjs"
   },
   "keywords": [],
   "author": "",

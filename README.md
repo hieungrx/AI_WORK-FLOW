@@ -18,6 +18,12 @@ Bộ khung khởi tạo (**Starter Template**) tự động hóa quy trình phá
   - Tự động điều hướng vào thư mục Dự án trên ChatGPT (mặc định `AI-WORKSPACE`).
   - Xoay vòng luồng chat độc lập cho từng Task và từng giai đoạn (`task-1-plan`, `task-1-review`, `task-1-rescue`).
   - Giới hạn cứng tối đa **2 vòng review** (`maxReviewRounds: 2`) cho mỗi giai đoạn.
+- **Tự động gạt Mức Suy luận (`setThinkingEffort` & `--effort <high|standard>`)**:
+  - Tự động chọn mức `high` ("Cao") cho `--mode plan` và `--mode rescue`; tự động chọn mức `standard` ("Chuẩn" / "Trung bình" / "Standard") cho `--mode review-code` để tối ưu tốc độ phản hồi (có thể ghi đè qua `--effort <high|standard>`).
+- **Bản đồ Khung Mã nguồn Tự động (`Repo Skeleton Map`)**:
+  - Tự động quét `sourceDirs`, trích xuất chữ ký `function`, `class`, `export`, `interface`, `type`, `def`, `public function` (tối đa 150 dòng) và đính kèm khối `--- REPO SKELETON MAP ---` vào `BOOTSTRAP` khi khởi tạo luồng chat mới.
+- **Checkpoint Cứu hộ Quota (`checkpoint.mjs` & `npm run checkpoint`)**:
+  - Tự động chụp nhanh thời gian, `taskId` đang mở, `git status --short`, `git diff --stat`, và kết quả chạy test (`PASS/FAIL`, `exitCode`) vào mục `## Snapshot Cứu Hộ Quota (Auto-Checkpoint)` trong `.agents/state/HANDOFF.md` để tài khoản kế tiếp tiếp quản ngay lập tức.
 - **Bộ khóa an toàn gọn nhẹ (`verify_guard.mjs` < 80 dòng & `.agents/hooks/pre-commit`)**:
   - Chặn sửa code trong `src/` khi `MENTOR_FEEDBACK.md` chưa có `STATUS: APPROVED`.
   - Chặn `git commit` chạm vào `src/` hoặc `tests/` nếu `CODE_REVIEW_FEEDBACK.md` chưa có `CODE_STATUS: APPROVED` hoặc `npm test` thất bại (`exitCode !== 0`).
@@ -92,7 +98,13 @@ Mở Chrome với Remote Debugging port `9222` và đăng nhập sẵn vào `htt
    ```bash
    node .agents/scripts/ask_mentor.mjs --mode rescue --task task-1 --error "Tóm tắt lỗi"
    ```
-4. **Kiểm tra thủ công Guard**:
+4. **Lưu Snapshot Cứu hộ Quota trước khi đổi tài khoản (`checkpoint.mjs`)**:
+   ```bash
+   node .agents/scripts/checkpoint.mjs --note "Đang làm dở phần xử lý lỗi"
+   # hoặc:
+   npm run checkpoint -- --note "Đang làm dở phần xử lý lỗi"
+   ```
+5. **Kiểm tra thủ công Guard**:
    ```bash
    node .agents/scripts/verify_guard.mjs --check-plan
    node .agents/scripts/verify_guard.mjs --pre-commit

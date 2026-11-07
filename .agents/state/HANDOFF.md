@@ -30,3 +30,25 @@ Dự án Demo minh họa kiến trúc điều phối **Multi-Account Antigravity
 ## 4. Trạng thái Bàn giao
 - Toàn bộ 3 Task trong `.agents/state/ROADMAP.md` đã hoàn thành `[x]`.
 - Quy trình điều phối RPIR và bộ công cụ Guard trong `.agents/scripts/` đã được tinh giản và sẵn sàng sử dụng cho các dự án/task tiếp theo.
+
+---
+
+## Snapshot Cứu Hộ Quota (Auto-Checkpoint)
+- **Thời gian Checkpoint**: `2026-11-07T08:10:05.694Z`
+- **Task đang mở (`taskId`)**: `task-3`
+- **Ghi chú (`--note`)**: Test checkpoint Level 1
+- **Tóm tắt Test (`npm test`)**: **PASS** (`exitCode: 0`) — [PASS] FS-5 — Baseline Verification: Toàn vẹn End-to-End chu trình CRUD thực tế không rò rỉ file .tmp (Kiểm chứng đĩa từng bước) | [PASS] FS-SYMLINK-CLEANUP — Kiểm chứng an toàn khi workspace chứa Symbolic Link (Không đổi quyền hay xóa file ngoài) | [PASS] FS-SELF-CLEANUP — Tự kiểm chứng lỗi Cleanup của withIsolatedFaultWorkspace (Không nuốt lỗi) | [PASS] FS-NESTED-CLEANUP — Kiểm chứng dọn dẹp an toàn khi workspace chứa thư mục con lồng nhau và file chỉ đọc trên POSIX | === TỔNG KẾT FS FAULT: 7/8 PASS | 0/8 FAIL | 1/8 SKIP (Executed: 8) === | --- CÁC KỊCH BẢN BỎ QUA DO GIỚI HẠN HĐH (SKIP) ---
+- **Trạng thái Git (`git status --short`)**:
+  ```text
+  M .agents/scripts/ask_mentor.mjs
+   M README.md
+   M package.json
+  ?? .agents/scripts/checkpoint.mjs
+  ```
+- **Thống kê Diff (`git diff --stat`)**:
+  ```text
+  .agents/scripts/ask_mentor.mjs | 260 +++++++++++++++++++++++++++++++++++++----
+   README.md                      |  14 ++-
+   package.json                   |   3 +-
+   3 files changed, 255 insertions(+), 22 deletions(-)
+  ```

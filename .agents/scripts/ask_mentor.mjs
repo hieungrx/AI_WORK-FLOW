@@ -18,7 +18,9 @@ const DEFAULT_CDP_URL = WORKFLOW_CONFIG.cdpUrl || 'http://127.0.0.1:9222';
 const DEFAULT_PROJECT_URL = 'https://chatgpt.com/';
 const DEFAULT_MODE = 'plan';
 const VALID_MODES = new Set(['plan', 'review-code', 'rescue']);
+const VALID_EFFORTS = new Set(['high', 'standard']);
 const MAX_DIFF_CHARS = 300_000;
+const MAX_SKELETON_LINES = 150;
 // Phạm vi review code: đọc từ .agents/config.json (mặc định ['src', 'tests']), tuyệt đối không gửi .agents/
 const REVIEW_SCOPE =
   Array.isArray(WORKFLOW_CONFIG.sourceDirs) && WORKFLOW_CONFIG.sourceDirs.length > 0
@@ -79,19 +81,51 @@ function normalizeTaskId(rawTask) {
 }
 
 /**
+ * Chuẩn hóa mức độ suy luận (`--effort`) về `'high'` hoặc `'standard'`.
+ *
+ * @param {string} rawEffort
+ * @returns {string}
+ */
+function normalizeEffort(rawEffort) {
+  if (typeof rawEffort !== 'string') {
+    return '';
+  }
+  const val = rawEffort.trim().toLowerCase();
+  if (!val) {
+    return '';
+  }
+  if (val === 'high' || val === 'cao') {
+    return 'high';
+  }
+  if (
+    val === 'standard' ||
+    val === 'medium' ||
+    val === 'chuẩn' ||
+    val === 'chuan' ||
+    val === 'trung bình' ||
+    val === 'vừa'
+  ) {
+    return 'standard';
+  }
+  return val;
+}
+
+/**
  * Chuẩn hóa tham số CLI:
  * - Bỏ hẳn tham số mặc định `--model gpt-4o`.
  * - Hỗ trợ `--mode <plan|review-code|rescue>` (mặc định: `plan`).
+ * - Hỗ trợ `--effort <high|standard>` (mặc định: `high` cho plan/rescue, `standard` cho review-code).
  * - Hỗ trợ `--task <task_id>` và `--new-thread` cho tính năng xoay vòng luồng chat theo Task.
  * - Hỗ trợ `--error "<tóm tắt lỗi>"` cho chế độ `rescue`.
  *
  * @param {string[]} argv
- * @returns {{ mode: 'plan' | 'review-code' | 'rescue', taskArg: string, newThread: boolean, errorSummary: string, model: string, cdpUrl: string }}
+ * @returns {{ mode: 'plan' | 'review-code' | 'rescue', taskArg: string, roleArg: string, effortArg: string, newThread: boolean, errorSummary: string, model: string, projectName: string, cdpUrl: string }}
  */
 function parseArgs(argv) {
   let mode = DEFAULT_MODE;
   let taskArg = '';
   let roleArg = '';
+  let effortArg = '';
   let newThread = false;
   let errorSummary = '';
   let model = '';
@@ -115,6 +149,11 @@ function parseArgs(argv) {
       i += 1;
     } else if (arg.startsWith('--role=')) {
       roleArg = arg.slice('--role='.length).trim().toLowerCase();
+    } else if (arg === '--effort' && i + 1 < argv.length) {
+      effortArg = normalizeEffort(argv[i + 1]);
+      i += 1;
+    } else if (arg.startsWith('--effort=')) {
+      effortArg = normalizeEffort(arg.slice('--effort='.length));
     } else if (arg === '--new-thread') {
       newThread = true;
     } else if (arg === '--error' && i + 1 < argv.length) {
@@ -146,10 +185,17 @@ function parseArgs(argv) {
     );
   }
 
+  if (effortArg && !VALID_EFFORTS.has(effortArg)) {
+    throw new Error(
+      `Mức suy luận --effort không hợp lệ: "${effortArg}". Chỉ hỗ trợ: high, standard.`
+    );
+  }
+
   return {
     mode,
     taskArg,
     roleArg,
+    effortArg,
     newThread,
     errorSummary,
     model,
@@ -485,23 +531,152 @@ function resolveCurrentTaskId(
 }
 
 /**
- * Xây dựng khối `--- NGỮ CẢNH BÀN GIAO DỰ ÁN (BOOTSTRAP) ---` từ `ROADMAP.md` và `HANDOFF.md`
- * khi bắt đầu luồng chat mới cho một Task mới.
+ * Quét danh sách file trong `sourceDirs` (từ `.agents/config.json`),
+ * lọc các dòng khai báo `function`, `class`, `export`, `interface`, `type`, `def`, `public function`
+ * (chỉ lấy dòng chữ ký, tối đa 150 dòng cho toàn repo).
+ *
+ * @param {string[]} [sourceDirs=REVIEW_SCOPE]
+ * @param {string} [repoRoot=REPO_ROOT]
+ * @param {number} [maxLines=MAX_SKELETON_LINES]
+ * @returns {string}
+ */
+export function buildRepoSkeleton(
+  sourceDirs = REVIEW_SCOPE,
+  repoRoot = REPO_ROOT,
+  maxLines = MAX_SKELETON_LINES
+) {
+  const dirs =
+    Array.isArray(sourceDirs) && sourceDirs.length > 0
+      ? sourceDirs
+      : REVIEW_SCOPE;
+  const collectedFiles = [];
+
+  function walkDir(currentAbsPath) {
+    let entries = [];
+    try {
+      entries = fs.readdirSync(currentAbsPath, { withFileTypes: true });
+    } catch (_err) {
+      return;
+    }
+    entries.sort((a, b) => a.name.localeCompare(b.name));
+    for (const entry of entries) {
+      if (
+        entry.name === 'node_modules' ||
+        entry.name === '.git' ||
+        entry.name === '.agents' ||
+        entry.name.startsWith('.')
+      ) {
+        continue;
+      }
+      const fullPath = path.join(currentAbsPath, entry.name);
+      if (entry.isDirectory()) {
+        walkDir(fullPath);
+      } else if (entry.isFile()) {
+        collectedFiles.push(fullPath);
+      }
+    }
+  }
+
+  for (const relDir of dirs) {
+    const absDir = path.resolve(repoRoot, relDir);
+    if (fs.existsSync(absDir)) {
+      try {
+        const stat = fs.statSync(absDir);
+        if (stat.isDirectory()) {
+          walkDir(absDir);
+        } else if (stat.isFile()) {
+          collectedFiles.push(absDir);
+        }
+      } catch (_err) {
+        // Bỏ qua đường dẫn lỗi
+      }
+    }
+  }
+
+  const signatureRegex =
+    /^(?:export\s+(?:default\s+)?)?(?:(?:public|protected|private|static|abstract|final|async)\s+)*(?:function\b|class\b|interface\b|type\b|def\b)|^export\s+(?:const|let|var|default|function|class|interface|type|\{)\b|^public\s+function\b|^module\.exports\b/;
+
+  const outputLines = [];
+  let truncated = false;
+
+  for (const filePath of collectedFiles) {
+    if (outputLines.length >= maxLines) {
+      truncated = true;
+      break;
+    }
+    const relPath = path.relative(repoRoot, filePath).replace(/\\/g, '/');
+    let content = '';
+    try {
+      content = fs.readFileSync(filePath, 'utf8');
+    } catch (_err) {
+      continue;
+    }
+    if (content.includes('\0')) {
+      continue;
+    }
+
+    const lines = content.split(/\r?\n/);
+    const fileSignatures = [];
+    for (let i = 0; i < lines.length; i += 1) {
+      const trimmed = lines[i].trim();
+      if (!trimmed || trimmed.startsWith('//') || trimmed.startsWith('#') || trimmed.startsWith('*')) {
+        continue;
+      }
+      if (signatureRegex.test(trimmed)) {
+        const cleanSig = trimmed.replace(/\s*\{+\s*$/, '').slice(0, 160);
+        fileSignatures.push(`  L${i + 1}: ${cleanSig}`);
+      }
+    }
+
+    outputLines.push(`[FILE] ${relPath}`);
+    if (outputLines.length >= maxLines) {
+      truncated = true;
+      break;
+    }
+
+    for (const sig of fileSignatures) {
+      if (outputLines.length >= maxLines) {
+        truncated = true;
+        break;
+      }
+      outputLines.push(sig);
+    }
+  }
+
+  if (outputLines.length === 0) {
+    return '(Không tìm thấy file hoặc chữ ký khai báo nào trong sourceDirs)';
+  }
+  if (truncated) {
+    outputLines.push(`... [ĐÃ GIỚI HẠN TỐI ĐA ${maxLines} DÒNG REPO SKELETON] ...`);
+  }
+  return outputLines.join('\n');
+}
+
+/**
+ * Xây dựng khối `--- NGỮ CẢNH BÀN GIAO DỰ ÁN (BOOTSTRAP) ---` từ `ROADMAP.md`, `HANDOFF.md`
+ * và `--- REPO SKELETON MAP ---` khi bắt đầu luồng chat mới (`effectiveNewThread`).
  *
  * @param {string} taskId
  * @param {string} roadmapContent
  * @param {string} handoffContent
+ * @param {string[]} [sourceDirs=REVIEW_SCOPE]
  * @returns {string}
  */
-function buildBootstrapContext(taskId, roadmapContent, handoffContent) {
+export function buildBootstrapContext(
+  taskId,
+  roadmapContent,
+  handoffContent,
+  sourceDirs = REVIEW_SCOPE
+) {
   const safeRoadmap = roadmapContent || '(Chưa có nội dung ROADMAP.md)';
   const safeHandoff = handoffContent || '(Chưa có nội dung HANDOFF.md)';
+  const repoSkeleton = buildRepoSkeleton(sourceDirs);
 
   return [
     '--- NGỮ CẢNH BÀN GIAO DỰ ÁN (BOOTSTRAP) ---',
     `Task hiện tại: ${taskId}`,
     'Đây là phiên làm việc (thread) mới được khởi tạo riêng cho Task này theo cơ chế Per-Task Thread Rotation.',
-    'Dưới đây là toàn bộ lộ trình dự án (ROADMAP.md) và biên bản bàn giao từ các Task trước (HANDOFF.md, bao gồm tiến độ và danh sách Technical Debt):',
+    'Dưới đây là toàn bộ lộ trình dự án (ROADMAP.md), biên bản bàn giao từ các Task trước (HANDOFF.md) và bản đồ khung mã nguồn (REPO SKELETON MAP):',
     '',
     '=== BẮT ĐẦU .agents/state/ROADMAP.md ===',
     safeRoadmap,
@@ -510,6 +685,10 @@ function buildBootstrapContext(taskId, roadmapContent, handoffContent) {
     '=== BẮT ĐẦU .agents/state/HANDOFF.md ===',
     safeHandoff,
     '=== KẾT THÚC .agents/state/HANDOFF.md ===',
+    '',
+    '--- REPO SKELETON MAP ---',
+    repoSkeleton,
+    '--- KẾT THÚC REPO SKELETON MAP ---',
     '--- KẾT THÚC NGỮ CẢNH BÀN GIAO DỰ ÁN (BOOTSTRAP) ---',
   ].join('\n');
 }
@@ -1028,22 +1207,38 @@ async function fillPromptFast(promptTextarea, text) {
 }
 
 /**
- * Đảm bảo mức độ suy luận (Reasoning Effort) trên thanh công cụ khung chat
- * được chuyển sang mức "Cao" / "High" nếu đang ở "Vừa", "Thấp", "Medium" hoặc "Low".
- * Bọc trong khối try/catch an toàn để không làm gãy luồng nếu giao diện đang ở sẵn mức Cao.
+ * Tự động điều chỉnh mức độ suy luận (Thinking / Reasoning Effort) trên thanh công cụ khung chat ChatGPT:
+ * - Hỗ trợ tham số `--effort <high|standard>`.
+ * - Nếu không truyền `explicitEffort`, mặc định `high` ("Cao") cho `--mode plan` và `--mode rescue`,
+ *   mặc định `standard` ("Chuẩn" / "Trung bình" / "Standard") cho `--mode review-code`.
+ * - Trước khi gửi tin nhắn, tìm nút chọn mức suy luận cạnh khung chat (đang hiển thị `Cao`, `Chuẩn`, `High`, `Standard`, `Medium`, `Vừa`, `Thấp`, `Low`),
+ *   nếu khác mức mục tiêu thì click mở menu và chọn mức tương ứng.
+ * - Bọc trong `try/catch` an toàn: nếu giao diện không có nút này thì bỏ qua không báo lỗi.
  *
  * @param {import('playwright-core').Page} page
+ * @param {'plan' | 'review-code' | 'rescue'} [mode='plan']
+ * @param {string} [explicitEffort='']
  * @returns {Promise<void>}
  */
-async function ensureHighReasoning(page) {
+export async function setThinkingEffort(page, mode = 'plan', explicitEffort = '') {
+  const normExplicit = normalizeEffort(explicitEffort);
+  const targetEffort =
+    normExplicit || (mode === 'review-code' ? 'standard' : 'high');
+  const targetLabelRegex =
+    targetEffort === 'standard'
+      ? /(?:^|\s|\n)(Chuẩn|Trung bình|Vừa|Standard|Medium)(?:$|\s|\n)/i
+      : /(?:^|\s|\n)(Cao|High)(?:$|\s|\n)/i;
+  const anyEffortButtonRegex =
+    /(?:^|\s|\n)(Cao|Chuẩn|Trung bình|Vừa|Thấp|High|Standard|Medium|Low)(?:$|\s|\n)/i;
+
   let menuOpened = false;
   try {
     const reasoningButton = page
       .locator(
-        'button[aria-label*="mô hình" i], button[aria-label*="model" i], button[aria-label*="suy luận" i], button[aria-label*="reasoning" i]'
+        'button[aria-label*="mô hình" i], button[aria-label*="model" i], button[aria-label*="suy luận" i], button[aria-label*="reasoning" i], button[aria-label*="thinking" i], button[aria-label*="effort" i], form button, [data-testid*="composer"] button'
       )
       .filter({
-        hasText: /(?:^|\s|\n)(Vừa|Thấp|Medium|Low)(?:$|\s|\n)/i,
+        hasText: anyEffortButtonRegex,
       })
       .first();
 
@@ -1053,7 +1248,7 @@ async function ensureHighReasoning(page) {
     }
 
     const buttonText = (await reasoningButton.innerText().catch(() => '')).trim();
-    if (/(?:^|\s|\n)(Cao|High)(?:$|\s|\n)/i.test(buttonText)) {
+    if (targetLabelRegex.test(buttonText)) {
       return;
     }
 
@@ -1065,15 +1260,18 @@ async function ensureHighReasoning(page) {
     );
     await menuItems.first().waitFor({ state: 'visible', timeout: 5_000 });
 
-    const highOption = menuItems
+    const targetOption = menuItems
       .filter({
-        hasText: /(?:^|\s|\n)(Cao|High)(?:$|\s|\n)/i,
+        hasText: targetLabelRegex,
       })
       .first();
 
-    if (await highOption.isVisible().catch(() => false)) {
-      await highOption.click({ timeout: 5_000 });
+    if (await targetOption.isVisible().catch(() => false)) {
+      await targetOption.click({ timeout: 5_000 });
       menuOpened = false;
+      console.log(
+        `[THINKING EFFORT]: Đã chuyển mức suy luận sang "${targetEffort}".`
+      );
       await sleep(300);
     } else {
       await page.keyboard.press('Escape').catch(() => {});
@@ -1084,6 +1282,10 @@ async function ensureHighReasoning(page) {
       await page.keyboard.press('Escape').catch(() => {});
     }
   }
+}
+
+async function ensureHighReasoning(page) {
+  return setThinkingEffort(page, 'plan', 'high');
 }
 
 /**
@@ -1475,6 +1677,7 @@ async function main() {
     mode,
     taskArg,
     roleArg,
+    effortArg,
     newThread,
     errorSummary,
     model,
@@ -1535,9 +1738,9 @@ async function main() {
   }
 
   const bootstrapBlock = isNewThread
-    ? buildBootstrapContext(taskId, roadmapContent, handoffContent)
+    ? buildBootstrapContext(taskId, roadmapContent, handoffContent, REVIEW_SCOPE)
     : '';
-  const { prompt: reviewPrompt, positiveTestExitCode } = buildMentorPrompt(
+  let { prompt: reviewPrompt, positiveTestExitCode } = buildMentorPrompt(
     mode,
     planContent,
     errorSummary,
@@ -1587,11 +1790,28 @@ async function main() {
         sessionMap,
       });
 
-    // 5. Đợi ô nhập prompt hiển thị và đảm bảo mức suy luận ở mức Cao / High
+    if (effectiveNewThread && !isNewThread) {
+      const effectiveBootstrap = buildBootstrapContext(
+        taskId,
+        roadmapContent,
+        handoffContent,
+        REVIEW_SCOPE
+      );
+      reviewPrompt = buildMentorPrompt(
+        mode,
+        planContent,
+        errorSummary,
+        effectiveBootstrap,
+        reviewSnapshot,
+        selectedRoles
+      ).prompt;
+    }
+
+    // 5. Đợi ô nhập prompt hiển thị và tự động điều chỉnh mức suy luận (Cao/High hoặc Chuẩn/Standard)
     const promptTextarea = page.locator(PROMPT_SELECTOR).first();
     await promptTextarea.waitFor({ state: 'visible', timeout: 60_000 });
 
-    await ensureHighReasoning(page);
+    await setThinkingEffort(page, mode, effortArg);
 
     // Chờ nếu đang có phản hồi chưa dừng từ trước
     const stopLocator = page.locator(STOP_BUTTON_SELECTOR);
