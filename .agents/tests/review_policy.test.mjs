@@ -406,11 +406,14 @@ test('RP-12: Chế độ khung chat Project (Trò chuyện / Công việc) qua -
   assert.equal(normalizeComposerMode('Công việc'), 'work');
   assert.equal(normalizeComposerMode('codex'), '');
 
-  // Ưu tiên: --composer > config > mặc định "work"
-  assert.equal(resolveComposerMode('', {}), 'work');
-  assert.equal(resolveComposerMode('', { chatgptComposerMode: 'chat' }), 'chat');
+  // Ưu tiên: --composer > (nếu có model thì tự chuyển sang "work") > config > mặc định "chat"
+  assert.equal(resolveComposerMode('', {}), 'chat');
+  assert.equal(resolveComposerMode('', { chatgptComposerMode: 'work' }), 'work');
+  assert.equal(resolveComposerMode('', { chatgptComposerMode: 'chat', chatgptModel: 'GPT-6.1 Sol' }), 'work');
+  assert.equal(resolveComposerMode('', { chatgptComposerMode: 'chat' }, 'GPT-6.1 Sol'), 'work');
+  assert.equal(resolveComposerMode('chat', { chatgptComposerMode: 'work', chatgptModel: 'GPT-6.1 Sol' }), 'chat');
   assert.equal(resolveComposerMode('work', { chatgptComposerMode: 'chat' }), 'work');
-  assert.equal(resolveComposerMode('', { chatgptComposerMode: 'bogus' }), 'work');
+  assert.equal(resolveComposerMode('', { chatgptComposerMode: 'bogus' }), 'chat');
 
   assert.equal(parseArgs(['--composer', 'chat']).composerArg, 'chat');
   assert.equal(parseArgs(['--composer=công việc']).composerArg, 'work');

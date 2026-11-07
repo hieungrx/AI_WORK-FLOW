@@ -24,7 +24,7 @@ export function loadWorkflowConfig(root = REPO_ROOT) {
     sourceDirs: ['src', 'tests'],
     testCommand: 'npm test',
     maxReviewRounds: 2,
-    chatgptComposerMode: 'work',
+    chatgptComposerMode: 'chat',
     chatgptModel: '',
   };
   try {

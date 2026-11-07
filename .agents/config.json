@@ -19,9 +19,9 @@
       "rescue": 2
     }
   },
+  "chatgptComposerMode": "chat",
+  "chatgptModel": "",
   "geminiGemUrl": "",
   "dualMentorPolicy": "chatgpt-gate",
-  "useGptMention": true,
-  "chatgptComposerMode": "work",
-  "chatgptModel": ""
+  "useGptMention": true
 }

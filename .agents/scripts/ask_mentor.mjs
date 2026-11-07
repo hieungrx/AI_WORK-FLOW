@@ -347,20 +347,25 @@ export function normalizeComposerMode(raw) {
 }
 
 /**
- * Xác định chế độ khung chat hiệu lực: `--composer` > `.agents/config.json -> chatgptComposerMode` > `work`.
- * Mặc định `work` vì đây là chế độ hỗ trợ chọn mô hình và thanh suy luận 5 nấc.
- * Cả hai chế độ đều hỗ trợ `@Plugin` chuyên gia.
+ * Xác định chế độ khung chat hiệu lực: `--composer` > (nếu có yêu cầu chọn model thì tự dùng `work`) > `.agents/config.json -> chatgptComposerMode` > `chat`.
+ * Mặc định `chat` (*Trò chuyện*) vì gọn nhẹ, có sẵn 3 mức suy luận (`Tức thì`/`Vừa`/`Cao`) và hỗ trợ đầy đủ `@Plugin` chuyên gia.
+ * Khi cần chọn mô hình cụ thể (qua `--model` hoặc `config.chatgptModel`) hoặc truyền `--composer work`, hệ thống dùng chế độ `work` (*Công việc*).
  *
  * @param {string} [composerArg='']
- * @param {{ chatgptComposerMode?: string }} [config={}]
+ * @param {{ chatgptComposerMode?: string, chatgptModel?: string }} [config={}]
+ * @param {string} [modelArg='']
  * @returns {'chat' | 'work'}
  */
-export function resolveComposerMode(composerArg = '', config = {}) {
-  return (
-    normalizeComposerMode(composerArg) ||
-    normalizeComposerMode(config?.chatgptComposerMode) ||
-    'work'
-  );
+export function resolveComposerMode(composerArg = '', config = {}, modelArg = '') {
+  const explicit = normalizeComposerMode(composerArg);
+  if (explicit) {
+    return explicit;
+  }
+  const wantedModel = String(modelArg || config?.chatgptModel || '').trim();
+  if (wantedModel) {
+    return 'work';
+  }
+  return normalizeComposerMode(config?.chatgptComposerMode) || 'chat';
 }
 
 /**
@@ -1330,6 +1335,9 @@ export async function ensureProjectComposerMode(page, composerMode) {
       return false;
     }
     if ((await target.getAttribute('aria-pressed').catch(() => '')) === 'true') {
+      console.log(
+        `[COMPOSER MODE]: Khung chat Project đang ở sẵn chế độ "${composerMode === 'chat' ? 'Trò chuyện' : 'Công việc'}".`
+      );
       return true;
     }
     await target.click({ timeout: 4_000 });
@@ -1633,13 +1641,27 @@ async function createChatGptProject(page, targetName) {
     .locator('button[type="submit"]:not([disabled])')
     .first();
 
+  const prevProjectMatch = page.url().match(/\/g\/(g-p-[a-z0-9]+)/i);
+  const prevProjectId = prevProjectMatch ? prevProjectMatch[1].toLowerCase() : '';
+
   await submitBtn.waitFor({ state: 'visible', timeout: 5_000 });
   await submitBtn.click({ timeout: 5_000 });
 
-  await page.waitForURL(/\/g\/g-p-[a-z0-9]+/i, { timeout: 15_000 });
-  await sleep(1500);
+  const waitStart = Date.now();
+  while (Date.now() - waitStart < 15_000) {
+    const curMatch = page.url().match(/\/g\/(g-p-[a-z0-9]+)/i);
+    if (curMatch && curMatch[1].toLowerCase() !== prevProjectId) {
+      break;
+    }
+    await sleep(300);
+  }
+  await sleep(1200);
 
-  const createdUrl = normalizeChatGptProjectUrl(page.url());
+  let createdUrl = normalizeChatGptProjectUrl(page.url());
+  const curProjectMatch = createdUrl.match(/\/g\/(g-p-[a-z0-9]+)/i);
+  if (!createdUrl || (prevProjectId && curProjectMatch && curProjectMatch[1].toLowerCase() === prevProjectId)) {
+    createdUrl = await findExistingProjectInSidebar(page, targetName);
+  }
   if (!createdUrl) {
     throw new Error(`Đã bấm Tạo dự án "${targetName}" nhưng URL chưa chuyển sang /g/g-p-... (hiện tại: ${page.url()}).`);
   }
@@ -1782,6 +1804,15 @@ async function prepareTaskThread(
     }
     const landedUrl = page.url();
     if (!expectedConvId || landedUrl.includes(expectedConvId)) {
+      // Đợi các lượt tin nhắn cũ của luồng hiện có render xong trước khi đọc previousAssistantCount
+      const renderStart = Date.now();
+      while (Date.now() - renderStart < 8_000) {
+        const st = await getAssistantState(page).catch(() => ({ userCount: 0, count: 0 }));
+        if (st.count > 0 || st.userCount > 0) {
+          break;
+        }
+        await sleep(300);
+      }
       return { previousConversationId, effectiveNewThread: false };
     }
     console.log(
@@ -2049,11 +2080,17 @@ async function fillPromptFast(promptTextarea, text) {
     }
 
     const payload = hasMentionPills ? ` \n\n${rawText}` : String(rawText);
+    const beforeLen = (el.innerText || '').length;
 
-    // Dán qua ClipboardEvent('paste') để cập nhật trực tiếp EditorState nội bộ của ProseMirror,
-    // giữ nguyên @Plugin pill, xuống dòng (\n) và bật ngay nút Gửi (disabled=false).
-    let pasted = false;
-    if (typeof DataTransfer !== 'undefined' && typeof ClipboardEvent !== 'undefined') {
+    // Ưu tiên document.execCommand('insertText') để điền trực tiếp vào ProseMirror,
+    // giữ nguyên @Plugin pill, xuống dòng (\n) và KHÔNG bị ChatGPT biến thành file đính kèm "Văn bản đã dán.txt".
+    let inserted = false;
+    if (typeof document.execCommand === 'function') {
+      document.execCommand('insertText', false, payload);
+      inserted = (el.innerText || '').length >= beforeLen + Math.min(20, rawText.length);
+    }
+
+    if (!inserted && typeof DataTransfer !== 'undefined' && typeof ClipboardEvent !== 'undefined') {
       const dt = new DataTransfer();
       dt.setData('text/plain', payload);
       const pasteEvent = new ClipboardEvent('paste', {
@@ -2062,14 +2099,10 @@ async function fillPromptFast(promptTextarea, text) {
         clipboardData: dt,
       });
       el.dispatchEvent(pasteEvent);
-      pasted = (el.innerText || '').length >= Math.min(20, rawText.length);
+      inserted = (el.innerText || '').length >= beforeLen + Math.min(20, rawText.length);
     }
 
-    if (!pasted && typeof document.execCommand === 'function') {
-      pasted = document.execCommand('insertText', false, payload);
-    }
-
-    if (!pasted) {
+    if (!inserted) {
       el.textContent = payload;
       el.dispatchEvent(
         new InputEvent('input', {
@@ -2129,6 +2162,9 @@ export async function setThinkingEffort(page, mode = 'plan', explicitEffort = ''
     const buttonText = (await reasoningButton.innerText().catch(() => '')).trim();
     const activeEffortHeader = buttonText.split(/\r?\n/).slice(0, 2).join('\n');
     if (targetLabelRegex.test(activeEffortHeader)) {
+      console.log(
+        `[THINKING EFFORT]: Đã ở sẵn mức suy luận "${targetEffort}" (${activeEffortHeader.replace(/\s+/g, ' ')}).`
+      );
       return;
     }
 
@@ -3369,7 +3405,7 @@ async function main() {
     cdpUrl,
     composerArg,
   } = parseArgs(process.argv.slice(2));
-  const composerMode = resolveComposerMode(composerArg, WORKFLOW_CONFIG);
+  const composerMode = resolveComposerMode(composerArg, WORKFLOW_CONFIG, model);
   const chatgptModel = (model || WORKFLOW_CONFIG.chatgptModel || '').trim();
   const selectedRoles = resolveSpecialistRoles(roleArg, mode);
   const dualPolicy = resolveDualMentorPolicy(WORKFLOW_CONFIG.dualMentorPolicy);
