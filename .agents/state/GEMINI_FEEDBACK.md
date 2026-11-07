@@ -1,61 +1,57 @@
 STATUS: APPROVED
 
-Bản thiết kế kỹ thuật AI_WORK-FLOW Level 1.2 (Bản Chốt v1.4) đã giải quyết triệt để toàn bộ 20 lỗi P0 (P0-01 → P0-20), 25 điểm hoàn thiện P1 (P1-01 → P1-25) và đáp ứng đầy đủ 3 điều kiện nghiệm thu DevOps/Security. Mọi mâu thuẫn tự khóa ở bước chuyển pha, lệch miền băm khi đối chiếu commit, tranh chấp ghi đồng thời và sai số đếm kịch bản kiểm thử đều đã được đóng lại bằng hợp đồng kỹ thuật tường minh. Kế hoạch v1.4 đạt chuẩn thiết kế thực thi, chính thức mở khóa triển khai mã nguồn cho Task 4.
+Bản thiết kế kỹ thuật AI_WORK-FLOW Level 1.2 (Bản Chốt v1.7) đã hoàn thành trọn vẹn 5/5 điều kiện Design Gate, giải quyết triệt để 29 điểm chặn P0 (P0-01 → P0-29) và 35 điểm hoàn thiện P1 (P1-01 → P1-35), đồng thời giữ nguyên cấu trúc kế toán kiểm thử chính xác gồm 39 nhóm định danh (G-1 → G-39) / 41 kịch bản thực thi độc lập (30 + 7 + 4 = 41). Các hợp đồng về rào chắn khóa hợp tác 2 chiều, điểm tuyến tính hóa giao dịch CAS, kiểm tra chống ghi đè từng file trong Pha R2, định nghĩa canonical cho transitionGovernanceHash và điều kiện tương đương cấp độ byte của CanonicalSnapshotManifest v1 đều đã đạt độ chín kỹ thuật để chính thức triển khai mã nguồn cho Task 4.
 
 1. Đánh giá Chuyên sâu theo Vai trò Chuyên gia
 Góc nhìn [architect] Software System Architect
 
-Khép kín Vòng đời Chuyển Task & Tháo gỡ Tự khóa (P0-17, P0-18 — G-34):
+Điểm Tuyến tính hóa Giao dịch & Tái kiểm chứng Hạ lưu (P0-27 — G-15, G-28, G-32):
 
-Đồng nhất miền băm (P0-18): Đưa chế độ cơ bản mode: 'commit' (git diff-tree -r --no-renames -z <baseCommitOid> <HEAD> kết hợp git ls-tree -z <HEAD>) về triển khai ngay trong Task 4 giúp lệnh --advance-task task-4 --to task-5 kiểm chứng chính xác hai chiều: cha trực tiếp git rev-parse --verify HEAD^ === lock.baseCommitOid và captureCodeSnapshot('commit', lock.baseCommitOid, 'HEAD').hash === lock.codeSnapshotHash (cùng miền SHA-256 manifest 64-hex).
+Thiết kế đã định nghĩa rõ điểm tuyến tính hóa (linearization point) tại lệnh fs.renameSync(tmp, STATE_LOCK.json) khi chuyển writePhase: "COMMITTED", tăng stateRevision: rev + 2 và xóa activeTxId: "" dưới sự bảo vệ của .state_lock.mutex.
 
-Chính sách Pure Governance Commit (P0-17): Thay thế quy tắc cấm chung .agents/** bằng cặp danh sách đối xứng transitionCommitAllowlist (đúng 7 file quản trị trong .agents/state/) và transitionCommitDenylist (cấm toàn bộ src/**, tests/**, .agents/scripts/**, .agents/config.json, LAST_REVIEW_BUNDLE.txt, package.json, v.v.) kèm điều kiện approvalState === "PENDING" và writePhase === "COMMITTED" trong Index. Nhờ đó, commit chuyển giao từ task-4 sang task-5 đi qua --pre-commit một cách hợp lệ mà không cần mở bất kỳ cổng hậu bypass nào.
+Bước Explicit Re-Read CAS kiểm tra đồng thời reRead.writePhase === "PREPARING" && reRead.stateRevision === rev + 1 && reRead.activeTxId === txId cùng planHash, HEAD === baseCommitOid và captureCodeSnapshot('worktree').hash ngay trước điểm tuyến tính hóa, kết hợp tái kiểm chứng bắt buộc tại verifyPreCommitGuard() và --ci-verify, giúp đóng kín kẽ hở dùng lại approval cũ sau khi worktree hoặc Git Index bị biến đổi.
 
-Điều khiển Đồng thời bằng Single-Writer Mutex & Monotonic CAS (P0-20 — G-15, G-16, G-28, G-37):
+Đặc tả Tương đương 3 Chế độ & Xử lý Đầy đủ Git Attributes/Filters (P0-29, P1-31 — G-22, G-31):
 
-Cơ chế khóa độc quyền .agents/state/.state_lock.mutex (fs.openSync(mutexPath, 'wx') kèm kiểm tra tiến trình sống qua process.kill(pid, 0)) kết hợp bộ đếm đơn điệu stateRevision (prevRev -> prevRev + 1 ở PREPARING và prevRev + 2 ở COMMITTED) đã khóa chặt cửa sổ TOCTOU. Bước đọc kiểm chứng lại toàn bộ stateRevision, txId, planHash, HEAD === baseCommitOid và captureCodeSnapshot('worktree') ngay trước khi hạ cờ COMMITTED đảm bảo tính toàn vẹn giao dịch cho cả luồng duyệt Plan lẫn duyệt Code.
+Tập đường dẫn ứng viên được xây dựng từ hợp keys(baseTreeMap) ∪ keys(targetStateMap) trên đường ống Buffer -z giúp thu thập không sót mọi thao tác thêm (A), sửa (M), xóa (D), đổi kiểu (T) và phát hiện lệch submodule/gitlink (SUBMODULE_DRIFT_OR_UNSUPPORTED).
 
-Đối chiếu Số học Kiểm thử Chính xác (P1-22, P1-23):
+Quy định bắt buộc đi qua git hash-object -t blob --stdin --path=<utf8PosixPath> (không dùng --no-filters) cho đường dẫn UTF-8 bảo đảm áp dụng đúng pipeline chuẩn hóa của Git Index đối với core.autocrlf, text, eol, ident, working-tree-encoding và filter. Với đường dẫn chứa byte non-UTF-8 trên POSIX, việc kiểm tra đủ 5 thuộc tính qua git check-attr -z --stdin kèm điều kiện core.autocrlf === false trước khi cho phép --no-filters (hoặc chặn fail-closed NON_UTF8_PATH_WITH_GIT_FILTERS_UNSUPPORTED) là hoàn toàn chặt chẽ.
 
-Bảng phân bổ đã khớp tuyệt đối giữa số nhóm định danh và số kịch bản thực thi: Task 4 gồm 25 nhóm ID / 26 test cases thực thi (G-1..G-16, G-26, G-28, G-30a, G-30b, G-32..G-37); Task 5 gồm 8 nhóm / 8 cases; Task 6 gồm 4 nhóm / 4 cases; tổng hợp tại Task 7 đạt chuẩn 37 nhóm ID (G-1 → G-37) / 38 test cases thực thi.
+Chuẩn hóa TRANSITION_GOV_SCHEMA:v1 Không Phụ thuộc Vòng (P1-34 — G-34):
+
+Định nghĩa tường minh thứ tự trường và danh sách 4 file quản trị chuẩn hóa LF theo thứ tự từ điển ASCII, đồng thời loại trừ transitionEvidence và updatedAt khỏi dữ liệu đầu vào của transitionGovernanceHash, giúp verifyPreCommitGuard() tái tạo và đối chiếu mã băm từ các blob trong Git Index một cách tất định.
 
 Góc nhìn [devops] DevOps, Reliability & Cost Engineer
 
-Ranh giới Minh bạch giữa Local Consistency Evidence và Trusted Approval Provenance (P0-19, P1-24 — G-30a, G-30b, G-33, G-36):
+Rào chắn Khóa Hợp tác Hai chiều & Xử lý Liveness UNKNOWN (P0-26, P1-32 — G-37):
 
-Chuẩn hóa lệnh --bootstrap-v13 (giữ alias --bootstrap-v12) với hành vi mặc định hạ về approvalState: "PENDING", provenanceLevel: "NONE" đảm bảo không tự cấp quyền từ dữ liệu cũ. Cờ --preserve-local-tier1-consistency chỉ bảo toàn PLAN_APPROVED dưới nhãn trung thực provenanceLevel: "TIER1_LOCAL_CONSISTENCY" khi toàn bộ chứng cứ nội bộ khớp từng byte và writePhase === "COMMITTED".
+Giao thức phối hợp giữa acquireStateMutex (kiểm tra .state_lock.recovery.mutex ở cả Bước W1 trước khi mở khóa và Bước W3 ngay sau khi mở khóa) và --recover-mutex (kiểm tra lại stat bigint + rawBytes + ownerToken ở Bước M3) loại bỏ hoàn toàn xung đột giữa writer thông thường và tiến trình thu hồi khóa.
 
-Đóng kín Dependency Closure của Verifier & Khôi phục Không Phá hủy (P1-17, P1-25):
+Quy tắc dừng fail-closed với MUTEX_LIVENESS_UNKNOWN khi processStartTime === "UNKNOWN" và STALE_RECOVERY_MUTEX_MANUAL_INSPECTION_REQUIRED khi chính khóa recovery bị mồ côi đảm bảo hệ thống không bao giờ suy diễn sai trạng thái sống của tiến trình hoặc rơi vào vòng lặp tự phá khóa đệ quy.
 
-Quy định .agents/scripts/verify_guard.mjs chỉ sử dụng các module nội tại node:* giúp triệt tiêu bề mặt tấn công chuỗi cung ứng/module injection từ working tree khi chạy --ci-verify.
+Bảo vệ Chống Ghi đè Từng File ở Pha R0–R1–R2 & Xóa Bỏ Alias Cũ (P0-28, P1-33, P1-35 — G-30a, G-39):
 
-Cơ chế --restore-backup <dir> giữ khóa .state_lock.mutex, kiểm tra toàn vẹn backup-manifest.json và đối chiếu pre-state-fingerprints.json để từ chối ghi đè (RESTORE_TARGET_DRIFTED) nếu phát hiện thay đổi phát sinh ngoài giao dịch.
+Bổ sung Pha R0 (CORRUPT_TRANSITION_JOURNAL) xác thực cấu trúc JSON, sentinel "MISSING" và mã băm của beforeBase64 trước khi chạm vào đĩa, kết hợp kiểm tra lại mã băm của từng file thứ i ngay trước lệnh ghi đè/xóa trong Pha R2 (TRANSITION_RECOVERY_MID_FLIGHT_DRIFT), giúp bảo vệ tối đa dữ liệu mới phát sinh ngoài giao dịch.
 
-Chính sách 0 SKIP Thực chất Đa Nền tảng:
+Việc loại bỏ hoàn toàn alias --bootstrap-v12 và chỉ chấp nhận --bootstrap-v13 (P1-35) giúp giao diện CLI nhất quán tuyệt đối với schemaVersion: "1.3".
 
-Tại Task 4, toàn bộ 26/26 test cases chỉ thao tác trên Git repo tạm, file, manifest hash, mutex và CAS nên bắt buộc đạt 26/26 PASS | 0 FAIL | 0 SKIP trên cả Windows lẫn POSIX. Việc tách riêng unit test chính sách symlink (0 SKIP mọi môi trường) và integration test symlink thực tế ở Task 5–6 đảm bảo tính trung thực của báo cáo kiểm thử.
+2. Lưu ý Kỹ thuật Khi Triển khai Code Task 4
 
-2. Chỉ dẫn Kỹ thuật Trọng tâm Khi Triển khai Task 4
+Thứ tự Giải phóng Khóa trong Bước W3 của acquireStateMutex (P0-26, G-37):
 
-Xử lý Stale Lockfile trong .state_lock.mutex (P0-20, G-37):
+Khi Bước W3 phát hiện .state_lock.recovery.mutex xuất hiện sau khi writer vừa tạo .state_lock.mutex, hãy đóng file descriptor (fs.closeSync(fd)) trước, đọc xác nhận lại ownerToken trên đĩa khớp với token vừa ghi rồi gọi fs.unlinkSync(mutexPath) trước khi ném lỗi RECOVERY_IN_PROGRESS.
 
-Khi fs.openSync(mutexPath, 'wx') trả về EEXIST, đọc nội dung JSON của .state_lock.mutex. Nếu pid hợp lệ và process.kill(pid, 0) thành công (hoặc ném EPERM trên Windows/POSIX nghĩa là tiến trình vẫn tồn tại), lập tức từ chối với mã lỗi CONCURRENT_STATE_MUTATION_BLOCKED. Chỉ thu hồi stale mutex khi process.kill(pid, 0) ném ESRCH (tiến trình đã chết) và thực hiện thu hồi nguyên tử qua đổi tên tạm trước khi mở lại 'wx'.
+Đóng Gói Các Sub-Assertions trong tests/guard_integrity.test.js:
 
-Kiểm tra Cha Trực tiếp của HEAD trong --advance-task (P0-18, G-34):
+Đảm bảo các nhánh kiểm thử mở rộng của G-15, G-22, G-30a, G-34, G-37 và G-39 được thực thi đầy đủ dưới dạng các bước kiểm tra bắt buộc (sub-assertions) bên trong hàm test tương ứng, giữ đúng tổng số 30 test cases thực thi của Task 4 đạt 30/30 PASS | 0 FAIL | 0 SKIP và npm test đạt exitCode: 0.
 
-Sử dụng git rev-parse --verify HEAD^0 để lấy OID của HEAD và git rev-parse --verify HEAD^1 (kèm kiểm tra commit không phải là merge commit có HEAD^2) để xác nhận HEAD^1 === lock.baseCommitOid trước khi gọi captureCodeSnapshot(root, cfg, { mode: 'commit', baseCommitOid: lock.baseCommitOid, targetCommitOid: 'HEAD', effectiveScope }).
+Tuân thủ Chu trình Nghiệm thu Task 4:
 
-Định dạng Header chuẩn cho .agents/state/LAST_REVIEW_BUNDLE.txt (P1-20, Điều kiện DevOps #2):
+Hoàn thiện mã nguồn trong phạm vi 7 file được ủy quyền của task-4, chạy pass toàn bộ npm test, gửi review code qua node .agents/scripts/ask_mentor.mjs --mode review-code, thực hiện git commit cho task-4, và chỉ gọi --advance-task task-4 --to task-5 sau khi commit hoàn tất.
 
-Chuẩn hóa toàn bộ nội dung gói review về \n (LF) trước khi ghi đĩa và băm SHA-256. Dòng header đầu tiên của bundle cần chứa cố định CODE_REVIEW_REQUEST_ID, TASK_ID, BASE_COMMIT_OID, và SNAPSHOT_SHA256 để verifyPreCommitGuard() vừa kiểm tra sha256(bundleBytes) === lock.reviewBundleHash, vừa đối chiếu trực tiếp metadata bên trong bundle với STATE_LOCK.json và Git Index.
-
-Thực thi Nghiệm thu Task 4:
-
-Giữ nguyên Active Task: task-4 và - [ ] Task 4 trong suốt quá trình code, chạy npm test (đảm bảo 26/26 PASS | 0 FAIL | 0 SKIP trong tests/guard_integrity.test.js), gửi --mode review-code và thực hiện git commit hoàn tất Task 4 trước khi chạy --advance-task task-4 --to task-5.
-
-Bắt đầu triển khai mã nguồn cho Task 4 theo kế hoạch v1.4:
-Triển khai verify_guard.mjs với Mutex, CAS và Snapshot 3 mode
-Cập nhật ask_mentor.mjs hỗ trợ Dual-Transaction và Review Bundle
-Viết 26 test cases Task 4 trong tests/guard_integrity.test.js
-Bạn có muốn bắt đầu triển khai các file mục tiêu của Task 4 ngay bây giờ không?
+Bắt đầu triển khai mã nguồn cho Task 4 theo bản thiết kế v1.7:
+Triển khai verify_guard.mjs theo hợp đồng v1.7
+Cập nhật ask_mentor.mjs với Cooperative Mutex và CAS
+Viết 30 kịch bản kiểm thử Task 4 trong guard_integrity.test.js
+Bạn có muốn bắt đầu triển khai mã nguồn cho verify_guard.mjs và ask_mentor.mjs ngay bây giờ không?
 Có

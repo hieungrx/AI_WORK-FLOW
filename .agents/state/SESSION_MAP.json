@@ -1,18 +1,18 @@
 {
   "projectName": "AI-WORKSPACE",
-  "projectUrl": "https://chatgpt.com/g/g-p-6ad3b17e96f88191bf0fda969044d956-ai-workspace/c/6aef3246-5064-83ec-99a8-624e9de3ca05",
+  "projectUrl": "https://chatgpt.com/g/g-p-6ad3b17e96f88191bf0fda969044d956/project",
   "geminiThreadUrl": "https://gemini.google.com/app/bba140fe8808ed1b",
   "currentTask": "task-4",
   "threads": {
     "task-4-plan": {
-      "url": "https://chatgpt.com/c/6aef5668-3c08-83ec-bb8f-1450378002e3",
+      "url": "https://chatgpt.com/g/g-p-6ad3b17e96f88191bf0fda969044d956-ai-workspace/c/6aef6654-4b58-83ec-9f1e-a12d6ce6a865",
       "rounds": 2,
-      "updatedAt": "2026-11-07T16:55:40.219Z"
+      "updatedAt": "2026-11-07T18:05:04.686Z"
     },
     "task-4": {
-      "url": "https://chatgpt.com/c/6aef5668-3c08-83ec-bb8f-1450378002e3",
+      "url": "https://chatgpt.com/g/g-p-6ad3b17e96f88191bf0fda969044d956-ai-workspace/c/6aef6654-4b58-83ec-9f1e-a12d6ce6a865",
       "rounds": 2,
-      "updatedAt": "2026-11-07T16:55:40.219Z"
+      "updatedAt": "2026-11-07T18:05:04.686Z"
     }
   }
 }

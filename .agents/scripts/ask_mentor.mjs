@@ -56,7 +56,7 @@ const SESSION_MAP_FILE = path.join(STATE_DIR, 'SESSION_MAP.json');
 const SOURCE_DIR_NAME = 'src';
 
 const PROMPT_SELECTOR =
-  '#prompt-textarea, div.ProseMirror[data-composer-markdown], div.ProseMirror[contenteditable="true"][aria-label*="ChatGPT"], [contenteditable="true"][aria-label*="ChatGPT"]';
+  '#prompt-textarea, div.ProseMirror[data-composer-markdown], div.ProseMirror[contenteditable="true"], [contenteditable="true"][aria-label*="ChatGPT"]';
 const SEND_BUTTON_SELECTOR =
   '[data-testid="send-button"], button[aria-label="Gửi"], button[aria-label*="Gửi"], button[aria-label="Send prompt"], button[aria-label*="Send"]';
 const STOP_BUTTON_SELECTOR =
@@ -1107,9 +1107,24 @@ async function prepareTaskThread(
     projectName || sessionMap?.projectName || DEFAULT_PROJECT_NAME
   );
 
+  const projectIdMatch = targetProjectUrl.match(/\/g\/(g-p-[a-z0-9]+)/i);
+  const requiredProjectId = projectIdMatch ? projectIdMatch[1].toLowerCase() : '';
+
   const normalizedExistingUrl =
     typeof existingThreadUrl === 'string' ? existingThreadUrl.trim() : '';
-  const effectiveNewThread = Boolean(isNewThread || !normalizedExistingUrl);
+  const isOutsideProject = Boolean(
+    requiredProjectId &&
+      normalizedExistingUrl &&
+      !normalizedExistingUrl.toLowerCase().includes(requiredProjectId)
+  );
+  if (isOutsideProject) {
+    console.log(
+      `[PROJECT ENFORCEMENT]: Luồng chat hiện tại (${normalizedExistingUrl}) nằm ngoài Project (${requiredProjectId}). Tự động chuyển vào Project!`
+    );
+  }
+  const effectiveNewThread = Boolean(
+    isNewThread || !normalizedExistingUrl || isOutsideProject
+  );
 
   const currentUrl = page.url();
   const prevMatch = currentUrl.match(CONVERSATION_URL_REGEX);
@@ -1138,7 +1153,7 @@ async function prepareTaskThread(
   // và tự động tạo luồng chat mới nằm gọn trong Project khi gửi prompt!
   console.log(`[TASK THREAD]: Khởi tạo luồng chat mới trong Project: ${targetProjectUrl}`);
   await page.goto(targetProjectUrl, { waitUntil: 'domcontentloaded' });
-  await sleep(1500);
+  await sleep(2500);
 
   return { previousConversationId, effectiveNewThread: true };
 }
@@ -1197,6 +1212,42 @@ async function waitForConversationUrl(
  * @param {Array<{ key: string, name: string, description: string }>} selectedRoles
  * @returns {Promise<boolean>}
  */
+/**
+ * Tự động xử lý banner chuyển đổi GPT -> Plugin một lần của ChatGPT ("... hiện là một plugin")
+ * bằng cách ưu tiên nhấn "Sử dụng plugin" (nếu khả dụng) hoặc fallback sang "Tiếp tục dùng GPT".
+ *
+ * @param {import('playwright-core').Page} page
+ * @returns {Promise<boolean>}
+ */
+async function handlePluginMigrationBanner(page) {
+  try {
+    const usePluginBtn = page
+      .locator('button:not([disabled])')
+      .filter({ hasText: /^(Sử dụng plugin|Use plugin)$/i })
+      .first();
+    if (await usePluginBtn.isVisible().catch(() => false)) {
+      await usePluginBtn.click({ timeout: 3_000 });
+      console.log('[PLUGIN MIGRATION]: Đã tự động nhấn "Sử dụng plugin".');
+      await sleep(800);
+      return true;
+    }
+
+    const keepGptBtn = page
+      .locator('button:not([disabled])')
+      .filter({ hasText: /^(Tiếp tục dùng GPT|Continue using GPT)$/i })
+      .first();
+    if (await keepGptBtn.isVisible().catch(() => false)) {
+      await keepGptBtn.click({ timeout: 3_000 });
+      console.log('[PLUGIN MIGRATION]: Đã tự động nhấn "Tiếp tục dùng GPT".');
+      await sleep(800);
+      return true;
+    }
+  } catch (_err) {
+    // Bỏ qua nếu không có banner hoặc vừa biến mất
+  }
+  return false;
+}
+
 async function tryInvokeGptMention(page, promptTextarea, selectedRoles) {
   if (
     !WORKFLOW_CONFIG.useGptMention ||
@@ -1206,51 +1257,123 @@ async function tryInvokeGptMention(page, promptTextarea, selectedRoles) {
     return false;
   }
 
-  const pluginName = selectedRoles[0].name;
+  let attachedCount = 0;
+
   try {
     await promptTextarea.click();
-    await page.keyboard.type(`@${pluginName}`, { delay: 15 });
-    await sleep(1000);
-
-    const popupOption = page
-      .locator('[role="option"], [role="menuitem"]')
-      .filter({ hasText: pluginName })
-      .first();
-
-    if (await popupOption.isVisible().catch(() => false)) {
-      await page.keyboard.press('Enter');
-      await sleep(300);
-      console.log(`[ROLE MENTION]: Đã kích hoạt "@${pluginName}" qua menu @mention.`);
-      return true;
-    }
-
-    // Nếu không có menu popup (ví dụ trong ChatGPT Project giới hạn @mention) -> xóa chuỗi @... và đi tiếp
     await promptTextarea.evaluate((el) => {
       el.focus();
       el.replaceChildren(document.createElement('p'));
-      el.dispatchEvent(
-        new InputEvent('input', {
-          bubbles: true,
-          cancelable: true,
-          inputType: 'deleteContentBackward',
-        })
-      );
     });
-    return false;
+
+    for (const role of selectedRoles) {
+      const pluginName = (role && role.name ? String(role.name) : '').trim();
+      if (!pluginName) continue;
+
+      const prevPillCount = await promptTextarea
+        .evaluate(
+          (el) =>
+            el.querySelectorAll(
+              '[app-mention-display-name], [app-mention-path], [data-appearance="inline-mention"]'
+            ).length
+        )
+        .catch(() => 0);
+
+      await promptTextarea.evaluate((el) => {
+        el.focus();
+        const sel = window.getSelection();
+        if (sel) {
+          sel.selectAllChildren(el);
+          sel.collapseToEnd();
+        }
+      });
+
+      await page.keyboard.type(`@${pluginName}`, { delay: 20 });
+      await sleep(1000);
+
+      // Ưu tiên chọn đúng mục Plugin mới ([data-plugin-impression-id]) thay vì bản Custom GPT cũ trùng tên
+      const preferredPluginOption = page
+        .locator('button[data-list-navigation-item="true"][data-plugin-impression-id]')
+        .filter({ hasText: pluginName })
+        .first();
+      const fallbackMenuOption = page
+        .locator('button[data-list-navigation-item="true"], [role="option"], [role="menuitem"]')
+        .filter({ hasText: pluginName })
+        .first();
+
+      let selectedFromMenu = false;
+      if (await preferredPluginOption.isVisible().catch(() => false)) {
+        await preferredPluginOption.click({ timeout: 3_000 });
+        selectedFromMenu = true;
+      } else if (await fallbackMenuOption.isVisible().catch(() => false)) {
+        await fallbackMenuOption.click({ timeout: 3_000 });
+        selectedFromMenu = true;
+      }
+
+      if (selectedFromMenu) {
+        await sleep(500);
+        await handlePluginMigrationBanner(page);
+
+        const newPillCount = await promptTextarea
+          .evaluate(
+            (el) =>
+              el.querySelectorAll(
+                '[app-mention-display-name], [app-mention-path], [data-appearance="inline-mention"]'
+              ).length
+          )
+          .catch(() => 0);
+
+        if (newPillCount > prevPillCount) {
+          attachedCount += 1;
+          console.log(
+            `[ROLE MENTION]: Đã kích hoạt Plugin "@${pluginName}" thành công.`
+          );
+          continue;
+        }
+      }
+
+      // Nếu không tìm thấy hoặc không gắn được pill -> đóng popup và xóa đúng phần chuỗi "@<pluginName>" vừa gõ, giữ nguyên các pill đã gắn trước đó
+      await page.keyboard.press('Escape').catch(() => {});
+      await promptTextarea
+        .evaluate((el, typedMention) => {
+          const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+          const toClean = [];
+          while (walker.nextNode()) {
+            const tNode = walker.currentNode;
+            if (
+              tNode.parentElement &&
+              tNode.parentElement.closest(
+                '[app-mention-display-name], [app-mention-path], [data-appearance="inline-mention"]'
+              )
+            ) {
+              continue;
+            }
+            if ((tNode.nodeValue || '').includes(typedMention)) {
+              toClean.push(tNode);
+            }
+          }
+          for (const tNode of toClean) {
+            tNode.nodeValue = (tNode.nodeValue || '').replace(typedMention, '');
+          }
+        }, `@${pluginName}`)
+        .catch(() => {});
+    }
+
+    return attachedCount > 0;
   } catch (_err) {
-    await promptTextarea
-      .evaluate((el) => {
-        el.replaceChildren(document.createElement('p'));
-      })
-      .catch(() => {});
-    return false;
+    await page.keyboard.press('Escape').catch(() => {});
+    return attachedCount > 0;
   }
 }
 
 async function fillPromptFast(promptTextarea, text) {
-  await promptTextarea.click();
   await promptTextarea.evaluate((el, rawText) => {
     el.focus();
+    const hasMentionPills =
+      el.querySelectorAll(
+        '[app-mention-display-name], [app-mention-path], [data-appearance="inline-mention"]'
+      ).length > 0;
+
     const pEl = document.createElement('p');
     const lines = rawText.split('\n');
     for (let i = 0; i < lines.length; i += 1) {
@@ -1259,7 +1382,19 @@ async function fillPromptFast(promptTextarea, text) {
       }
       pEl.appendChild(document.createTextNode(lines[i]));
     }
-    el.replaceChildren(pEl);
+
+    if (hasMentionPills) {
+      el.appendChild(pEl);
+    } else {
+      el.replaceChildren(pEl);
+    }
+
+    const sel = window.getSelection();
+    if (sel) {
+      sel.selectAllChildren(el);
+      sel.collapseToEnd();
+    }
+
     el.dispatchEvent(
       new InputEvent('input', {
         bubbles: true,
@@ -1652,6 +1787,7 @@ async function waitForStableAssistantResponse(
 
   // 1. Chờ tin nhắn phản hồi mới bắt đầu sinh hoặc nút stop-button xuất hiện
   while (Date.now() - startTime < timeoutMs) {
+    await handlePluginMigrationBanner(page);
     const { userCount, count } = await getAssistantState(page).catch(() => ({
       userCount: 0,
       count: 0,
@@ -1674,6 +1810,7 @@ async function waitForStableAssistantResponse(
   const requiredStableTicks = 3;
 
   while (Date.now() - startTime < timeoutMs) {
+    await handlePluginMigrationBanner(page);
     const stopVisible = (await stopButtonLocator.count().catch(() => 0)) > 0;
     const { count, lastText: currentText } = await getAssistantState(page).catch(
       () => ({ userCount: 0, count: 0, lastText: '' })
@@ -2237,6 +2374,7 @@ async function main() {
 
       await tryInvokeGptMention(page, promptTextarea, selectedRoles);
       await fillPromptFast(promptTextarea, reviewPrompt);
+      await page.keyboard.press('Space').catch(() => {});
 
       // Nhấn nút gửi ([data-testid="send-button"] hoặc button[aria-label="Gửi"])
       const sendButton = page.locator(SEND_BUTTON_SELECTOR).first();

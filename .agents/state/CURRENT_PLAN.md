@@ -1,162 +1,139 @@
-# KẾ HOẠCH NÂNG CẤP AI_WORK-FLOW LEVEL 1.2 (BẢN CHỐT v1.5) — INTEGRITY & SECURITY HARDENING
+# KẾ HOẠCH NÂNG CẤP AI_WORK-FLOW LEVEL 1.2 (BẢN CHỐT v1.7) — INTEGRITY & SECURITY HARDENING
 
 - **Phase Plan**: `Level 1.2`
 - **Active Task**: `task-4`
-- **Approved Scope**: `task-4` (Lộ trình tổng thể: `Task 4` -> `Task 7`, thực thi và nghiệm thu độc lập theo từng Task RPIR)
-- **Approval Revision**: `v1.5` (Khắc phục triệt để `P0-21` -> `P0-23` và `P1-26` -> `P1-28`)
+- **Approved Scope**: `task-4` (Lộ trình 4 Task: `Task 4` -> `Task 7`; khóa chặt schema `CanonicalSnapshotManifest v1` ngay tại `Task 4`, không phá vỡ ở `Task 5`)
+- **Approval Revision**: `v1.7` (Hoàn thành 5/5 điều kiện Design Gate: đóng `P0-26` -> `P0-29` và `P1-32` -> `P1-35`)
 
-> **Trạng thái tài liệu**: Bản thiết kế kỹ thuật **v1.5** đã đóng toàn bộ **23 lỗi P0 (`P0-01` -> `P0-23`)**, **28 điểm P1 (`P1-01` -> `P1-28`)**, và chuẩn hóa chính xác **39 nhóm kiểm thử (`G-1` -> `G-39`) / 41 test cases thực thi độc lập** (`30 + 7 + 4 = 41`).
-> **Nguyên tắc**: Chỉ lập kế hoạch, chưa triển khai mã nguồn Task 4 trước khi nhận `STATUS: APPROVED`.
+> **Trạng thái tài liệu**: Bản thiết kế kỹ thuật **v1.7** giữ nguyên kiến trúc gọn nhẹ bằng Node.js thuần + Git CLI, định nghĩa trung thực ranh giới tin cậy và điểm tuyến tính hóa giao dịch, đóng toàn bộ **29 điểm P0 (`P0-01` -> `P0-29`)** và **35 điểm P1 (`P1-01` -> `P1-35`)**, duy trì chính xác **39 nhóm kiểm thử (`G-1` -> `G-39`) / 41 test cases thực thi độc lập** (`30 + 7 + 4 = 41`).
+> **Nguyên tắc**: Chỉ cập nhật tài liệu kế hoạch, chưa triển khai mã nguồn Task 4 trước khi nhận `STATUS: APPROVED`.
 
 ---
 
-## 1. Bảng Đối Chiếu Khắc Phục Các Điểm Chặn Từ Vòng Review v1.4 (`P0-21` -> `P0-23` & `P1-26` -> `P1-28`)
+## 1. Bảng Đối Chiếu Khắc Phục 5 Điều Kiện Mở Gate Từ Vòng Review v1.6 (`P0-26` -> `P0-29` & `P1-32` -> `P1-35`)
 
-| Mã lỗi | Phát hiện của ChatGPT Mentor trên Bản v1.4 | Hợp Đồng Kỹ Thuật Chốt Trong Bản v1.5 |
+| Mã lỗi | Phát hiện của ChatGPT Mentor (Architect + DevOps) trên Bản v1.6 | Hợp Đồng Kỹ Thuật Chốt Trong Bản v1.7 |
 | :--- | :--- | :--- |
-| **P0-21** | **Self-referential Bundle Hash**: Nhúng `BUNDLE_SHA256: <reviewBundleHash>` vào bên trong `LAST_REVIEW_BUNDLE.txt` trong khi định nghĩa `reviewBundleHash = sha256(bundleBytes)` tạo vòng phụ thuộc toán học không thể băm. | **Non-Self-Referential Bundle & Envelope Contract (Phương án A)**: Tuyệt đối **không** ghi `BUNDLE_SHA256` vào bên trong `LAST_REVIEW_BUNDLE.txt`. File `LAST_REVIEW_BUNDLE.txt` chỉ chứa `CODE_REVIEW_REQUEST_ID`, `TASK_ID`, `BASE_COMMIT_OID`, `SNAPSHOT_SHA256`, Canonical Manifest, Test Evidence và Source/Diff đầy đủ. Sau khi chốt bytes của file, tính `reviewBundleHash = sha256(bundleBytes)` rồi truyền độc lập trong **Mentor Request Envelope** (ngoài file bundle), lưu vào `STATE_LOCK.json` và nhúng vào `BUNDLE: <reviewBundleHash>` ở footer `CODE_REVIEW_FEEDBACK.md` (`G-38`). |
-| **P0-22** | **Governance Commit có thể thành đường bypass**: Chỉ kiểm tra `stagedPaths ⊆ transitionCommitAllowlist` + `PENDING` chưa phân biệt được transition hợp lệ do `--advance-task` tạo ra với một bộ sửa đổi quản trị tùy ý. | **Cryptographically Bound `transitionEvidence` & Tách Biệt 2 Luồng Quản Trị**: (1) **`GOVERNANCE_TASK_TRANSITION`**: `--advance-task` sinh `transitionEvidence` một lần (`consumed: false`) ràng buộc `fromTaskId`, `toTaskId`, `transitionBaseOid`, `approvedCodeCommitOid`, `approvedCodeSnapshotHash`, `transitionGovernanceHash` và `transitionTxId`; `--pre-commit` kiểm tra `HEAD === approvedCodeCommitOid`, đúng phép biến đổi `task-N -> task-(N+1)` trên `ROADMAP.md`/`CURRENT_PLAN.md`/`STATE_LOCK.json` (`allowedPaths: []`), khớp `transitionGovernanceHash` và không cho tái sử dụng. (2) **`GOVERNANCE_PLAN_UPDATE`**: Luồng riêng chỉ cho phép cập nhật `CURRENT_PLAN.md`, `HANDOFF.md`, `SESSION_MAP.json` (và reset `PENDING`) khi giữ nguyên `activeTaskId`, `ROADMAP.md` checkboxes và `allowedPaths` như trên `HEAD` (`G-34`). |
-| **P0-23** | **Thiếu hợp đồng byte-level cho `CanonicalSnapshotManifest`**: Ba mode `worktree`, `index`, `commit` có thể lấy các trường metadata khác nhau hoặc lệch `fileMode` trên Windows, không đảm bảo sinh ra cùng dãy byte manifest. | **Byte-Identical `CanonicalSnapshotManifest v1` Ngay Trong Task 4**: Định nghĩa đặc tả tuần tự hóa cấp độ byte duy nhất cho cả 3 mode ngay tại Task 4 (không đẩy sang Task 5): tự động phát hiện `OBJECT_HASH_ALGO` (`sha1`/`sha256` qua `git rev-parse --show-object-format`), mã hóa đường dẫn lossless bằng `pathHex` (raw Git path bytes sang lower-hex), sắp xếp bằng `Buffer.compare(rawPathBytes)`, loại bỏ mọi trường riêng theo mode, đồng bộ `fileMode` trên Windows (`core.filemode=false` kế thừa bit `100755` từ Index/baseCommit), và chứng minh bằng test `G-22` ngay tại Task 4 rằng **cả 3 mode sinh ra cùng một chuỗi byte manifest giống hệt nhau từng byte**. |
-| **P1-26** | Mutex dùng `process.kill(pid, 0)` có thể gặp PID reuse sau crash, lỗi `EPERM` khác quyền, hoặc tự phá khóa sai nếu dùng timeout. | **Safe Owner-Token & Process-Start-Time Mutex**: `.state_lock.mutex` lưu `{ ownerToken, pid, processStartTime, hostname, createdAt, scope }`. Mở khóa chỉ khi khớp `ownerToken`. Khi gặp `EEXIST`: nếu `process.kill(pid, 0)` thành công **hoặc ném `EPERM`** và `processStartTime` vẫn khớp tiến trình OS -> chặn ngay (`CONCURRENT_STATE_MUTATION_BLOCKED`). **Cấm tuyệt đối tự phá khóa theo timeout thời gian thực**; chỉ thu hồi khóa mồ côi khi `ESRCH` hoặc `processStartTime` của PID trên OS khác với `lock.processStartTime` (xác nhận PID reuse) (`G-37`). |
-| **P1-27** | `--advance-task` sửa 5 file quản trị nhưng chưa có cơ chế rollback xác định nếu lỗi giữa chừng. | **Atomic Transition Journal (`.transition_journal.json`)**: Trước khi sửa bất kỳ file nào, `--advance-task` ghi `.agents/state/.transition_journal.json` lưu bản gốc + SHA-256 của cả 5 file quản trị. Nếu sập giữa chừng, sự hiện diện của `.transition_journal.json` khiến Guard **FAIL-CLOSED (`INCOMPLETE_TASK_TRANSITION`)** ngăn commit trạng thái lai, và lệnh `--recover-transition` khôi phục nguyên trạng 100% cả 5 file (`G-39`). |
-| **P1-28** | `G-30b` gộp 2 hành vi khác nhau (migration mặc định `PENDING` và từ chối restore khi đích đã drift) vào 1 test case. | **Tách Độc Lập `G-30a`, `G-30b`, `G-30c` & Cập Nhật Bảng Đếm**: Tách thành 3 test cases thực thi riêng biệt (`G-30a`: Tier-1 consistent migration & Idempotency; `G-30b`: default migration -> `PENDING`; `G-30c`: `--restore-backup` chặn `RESTORE_TARGET_DRIFTED`), cộng thêm `G-38` (`P0-21`) và `G-39` (`P1-27`), nâng tổng số lên **39 nhóm ID / 41 test cases thực thi** (`30 + 7 + 4 = 41`). |
+| **P0-26** | **Mutex recovery chưa là rào chắn chung với writer bình thường & giới hạn OS `unlink`**: Writer bình thường không kiểm tra `.state_lock.recovery.mutex`, và chuỗi `lstat -> readFile -> unlink` không phải phép compare-and-delete nguyên tử trước tiến trình ngoài giao thức. | **Unified Cooperative Barrier & Ranh Giới Tin Cậy Minh Bạch**: (1) **Chốt Trust Boundary**: Cơ chế mutex bảo đảm loại trừ tương hỗ **giữa các tiến trình hợp tác tuân thủ giao thức**; không tuyên bố tính nguyên tử trước tác nhân cục bộ ngoài giao thức cố tình thay đổi/xóa file khóa trực tiếp. (2) **Giao thức 2 chiều**: Mọi writer bình thường kiểm tra `.state_lock.recovery.mutex` **trước** khi mở `.state_lock.mutex` (`wx`) và **kiểm tra lại ngay sau khi chiếm khóa** (nếu thấy recovery đang chạy thì tự nhả khóa của mình và dừng với `RECOVERY_IN_PROGRESS`). Ngược lại, `--recover-mutex` kiểm tra lại `ownerToken` + fingerprint ngay trước `unlinkSync`. (3) Nếu bản thân `.state_lock.recovery.mutex` mồ côi sau crash -> **fail-closed (`STALE_RECOVERY_MUTEX_MANUAL_INSPECTION_REQUIRED`)** kèm quy trình vận hành thủ công, không đệ quy tự phá khóa (`G-37`). |
+| **P0-27** | **Chưa định nghĩa điểm tuyến tính hóa (linearization point) & giới hạn của Re-Read CAS**: State mutex không khóa Git Index, `HEAD` hay worktree trước tiến trình Git/editor bên ngoài chạy song song ngay sau bước kiểm tra CAS. | **Định Nghĩa Điểm Commit, Explicit Tx/Revision CAS & Revalidation Bắt Buộc**: (1) **Điểm tuyến tính hóa**: Phép `fs.renameSync(tmp, STATE_LOCK.json)` ghi `writePhase: "COMMITTED"` và tăng `stateRevision` dưới `.state_lock.mutex`. (2) **Giới hạn trung thực**: CAS chỉ thu hẹp cửa sổ tranh chấp và bảo vệ trạng thái `STATE_LOCK.json` giữa các writer hợp tác (so sánh tường minh `stateRevision`, `writePhase === "PREPARING"` và `activeTxId`), **không ngăn được** thay đổi worktree/Index/`HEAD` ngoài giao thức sau thời điểm đọc. (3) **Chốt chặn hạ lưu bắt buộc**: Mọi thay đổi worktree/Index/`HEAD` phát sinh quanh hoặc sau CAS đều bị phát hiện tất định khi tái kiểm chứng tại `verifyPreCommitGuard()` và `--ci-verify`, vô hiệu hóa việc dùng approval cũ cho trạng thái mới (`G-15`). |
+| **P0-28** | **Transition rollback chưa chống drift phát sinh ngay trong Pha R2**: Tác nhân ngoài giao thức sửa file `#4` sau khi Pha R1 đã PASS sẽ bị Pha R2 ghi đè. | **Per-File Just-In-Time Re-Check Trong Pha R2 & Ngữ Nghĩa Partial Rollback Minh Bạch**: (1) Giữa các writer hợp tác cùng tuân thủ `.state_lock.mutex`, rollback 5 file là toàn vẹn. (2) Trước tác nhân sửa file ngoài giao thức giữa Pha R2: **ngay trước mỗi lệnh thay thế từng file thứ `i`**, `--recover-transition` đọc và băm lại file `i` trên đĩa; nếu lệch khỏi `{beforeSha256, expectedAfterSha256}` -> **dừng ngay lập tức (`TRANSITION_RECOVERY_MID_FLIGHT_DRIFT`), tuyệt đối không ghi đè file `i`, giữ nguyên `.transition_journal.json`** (hệ thống tiếp tục fail-closed) và công bố rõ các file `1..(i-1)` đã rollback một phần để người vận hành xử lý (`G-39`). |
+| **P0-29** | **Snapshot chưa quy định đủ điều kiện tương đương với Git attributes, filters & tập ứng viên**: Thiếu xử lý `working-tree-encoding`, `ident`, `core.autocrlf`, xóa file trong worktree, gitlink/submodule và điều kiện để 3 mode tương đương. | **Hợp Đồng Đầy Đủ Git Attributes/Filters & Điều Kiện Tương Đương 3 Mode**: (1) Tập đường dẫn ứng viên là hợp `keys(baseTreeMap) U keys(targetStateMap)` nên bắt trọn mọi file xóa (`D`), thêm (`A`), sửa (`M`), đổi kiểu (`T`). (2) Đường dẫn UTF-8 luôn qua `git hash-object -t blob --stdin --path=<utf8PosixPath>` (tuyệt đối không dùng `--no-filters`), áp dụng đúng pipeline Index cho `core.autocrlf`, `text`, `eol`, `ident`, `working-tree-encoding`, `filter`. (3) Đường dẫn non-UTF-8 kiểm tra đủ 5 thuộc tính `filter, ident, working-tree-encoding, text, eol` + `core.autocrlf=false`; nếu có bất kỳ phép biến đổi nào -> fail-closed (`NON_UTF8_PATH_WITH_GIT_FILTERS_UNSUPPORTED`). (4) Submodule/gitlink lệch giữa worktree và Index -> fail-closed (`SUBMODULE_DRIFT_OR_UNSUPPORTED`). Định nghĩa rõ 3 điều kiện tiền đề để 3 mode trùng khớp byte-for-byte (`G-22`, `G-31`). |
+| **P1-32** | **`--recover-mutex` chưa quy định hành vi khi `processStartTime` không lấy được (`UNKNOWN`)**. | **Fail-Closed Khi Liveness `UNKNOWN`**: Nếu `lock.processStartTime === "UNKNOWN"` hoặc hệ điều hành không truy xuất được `processStartTime` hiện tại của `pid` đang tồn tại -> bắt buộc dừng fail-closed (`MUTEX_LIVENESS_UNKNOWN`), **cấm suy diễn tiến trình đã chết** (`G-37`). |
+| **P1-33** | **Journal chưa đặc tả sentinel cho file không tồn tại & kiểm tra `beforeBase64`**. | **Sentinel `"MISSING"` Nhất Quán & Pre-Validation Journal**: Khi `existedBefore === false` thì `beforeSha256: "MISSING"`, `beforeBase64: null`; khi `existedBefore === true` thì `beforeSha256` là 64-hex và `sha256(Buffer.from(beforeBase64, 'base64')) === beforeSha256`. Kiểm tra cấu trúc/hash/Base64 của toàn bộ journal trước Pha R1; sai lệch -> từ chối ngay (`CORRUPT_TRANSITION_JOURNAL`) trước khi chạm vào đĩa (`G-39`). |
+| **P1-34** | **`transitionGovernanceHash` chưa có định nghĩa canonical không phụ thuộc vòng**. | **Đặc Tả Canonical `TRANSITION_GOV_SCHEMA:v1`**: Định nghĩa chính xác thứ tự trường, chuẩn hóa LF, mã hóa UTF-8, sắp xếp từ điển 4 file quản trị và loại trừ tường minh `transitionEvidence` + `updatedAt` khỏi dữ liệu băm (§3.3.1). |
+| **P1-35** | **Alias `--bootstrap-v12` gây hiểu nhầm rằng tạo ra schema v1.2**. | **Loại Bỏ Hoàn Toàn Alias `--bootstrap-v12`**: Chỉ hỗ trợ lệnh duy nhất `--bootstrap-v13` (tạo `schemaVersion: "1.3"`). Nếu truyền `--bootstrap-v12` -> báo lỗi tham số không hợp lệ và hướng dẫn dùng `--bootstrap-v13`. |
 
 ---
 
-## 2. Mô Hình Tin Cậy 2 Tầng & Giới Hạn Thực Thi (`P0-19`, `P0-20`, `P1-17`)
+## 2. Mô Hình Tin Cậy 2 Tầng, Ranh Giới Giao Thức & Phân Định GitHub CI (`P0-19`, `P0-26`, `P0-27`)
 
-1. **Tier 1 — Local Workflow Integrity Guard (Nghiệm thu trọn vẹn trong Task 4–7)**:
-   - Bảo đảm tính nhất quán nội bộ (**Local Consistency Evidence**) xuyên suốt vòng đời giữa Plan, Feedback, Bundle, Lock, Working Tree, Git Index và Commit Tree; chống lỗi thao tác, torn-write, stale replay, partial staging và lệch chuyển pha.
-   - **Giới hạn trung thực**: Không thay thế ranh giới bảo mật độc lập trước tiến trình cục bộ có quyền ghi toàn bộ filesystem cố tình sửa đồng thời mọi file state/script, chạy `git commit --no-verify`, hoặc can thiệp sau thời điểm `pre-commit` kết thúc. Cấm tuyệt đối mọi biến môi trường bypass (`AI_WORKFLOW_ALLOW_*`).
-2. **Tier 2 — Independent Verification Boundary (Hạ tầng Ngoài Quyền Worker)**:
-   - Đòi hỏi cấu hình trên GitHub Remote: **Branch Protection + CODEOWNERS + Required PR Approval** (nguồn **Trusted Approval Provenance** độc lập) và job CI chạy bản `verify_guard.mjs` tự thân (chỉ import `node:*`, không nạp bất kỳ module nào từ PR worktree) được checkout từ nhánh bảo vệ (`origin/master`).
+1. **Tier 1 — Cooperative Local Workflow Integrity Guard (Phạm vi Task 4–7)**:
+   - Bảo đảm tính nhất quán nội bộ (**Local Consistency Evidence** & **Hash-Bound Local Transition Evidence**) giữa các công cụ trong luồng công việc hợp tác (cùng tuân thủ `.state_lock.mutex` và `.state_lock.recovery.mutex`).
+   - **Giới hạn trung thực**: User-space mutex và chuỗi ghi nhiều file trên Node.js/OS **không cung cấp** tính nguyên tử giao dịch trước các tiến trình cục bộ ngoài giao thức cố tình sửa/xóa trực tiếp file khóa, sửa worktree/`.git/index` song song mà không qua khóa, hoặc chạy `git commit --no-verify`. Thay vì tuyên bố ngăn chặn vật lý các tác nhân đó tại thời điểm ghi, hệ thống bảo đảm **phát hiện lệch (drift detection) và chặn fail-closed tại cổng tái kiểm chứng kế tiếp** (`--recover-transition` R2, `verifyPreCommitGuard`, `--ci-verify`). Cấm tuyệt đối mọi biến môi trường bypass (`AI_WORKFLOW_ALLOW_*`).
+2. **Tier 2 — Independent Remote Verification Boundary (Phân Định 3 Thành Phần Rõ Ràng Trên GitHub CI)**:
+   - **Trusted Verifier Code**: Bản `verify_guard.mjs` tự thân (chỉ import `node:*`) được checkout từ nhánh bảo vệ (`origin/master`) ra thư mục ngoài vùng PR; cấm tuyệt đối thực thi bản `verify_guard.mjs` do PR cung cấp (`G-25`).
+   - **Untrusted Candidate Code**: Cây mã nguồn và lịch sử commit của nhánh PR chỉ được đọc dưới dạng dữ liệu đầu vào không tin cậy để kiểm tra snapshot và phạm vi đường dẫn.
+   - **Trusted Approval Evidence**: Nguồn xác thực phê duyệt độc lập đến từ **cấu hình GitHub Branch Protection + CODEOWNERS + Required PR Reviews & Required Status Checks** trên kho lưu trữ từ xa (việc chỉ checkout verifier từ `origin/master` chỉ bảo đảm tính toàn vẹn của công cụ kiểm tra, không tự chứng minh quyền phê duyệt nếu thiếu kiểm tra chính sách PR review/branch protection).
 
 ---
 
-## 3. Bốn Hợp Đồng Kỹ Thuật Cốt Lõi (Core Technical Contracts v1.5)
+## 3. Bốn Hợp Đồng Kỹ Thuật Cốt Lõi (Core Technical Contracts v1.7)
 
-### 3.1. Hợp Đồng 1: Dual-Transaction Approval, Safe Mutex, CAS & Non-Self-Referential Bundle (`P0-13`, `P0-20`, `P0-21`, `P1-15`, `P1-26`)
+### 3.1. Hợp Đồng 1: Cooperative Mutex/Recovery Gate, Linearization Point, CAS & Non-Self-Referential Bundle (`P0-21`, `P0-26`, `P0-27`, `P1-32`)
 
-1. **Chuẩn hóa `CRLF -> LF` Nhất quán**: Áp dụng `\r\n|\r -> \n` trước mọi bước băm văn bản (`computeCanonicalPlanHash`, `parseStrictSingleFooter`, `LAST_REVIEW_BUNDLE.txt`).
-2. **Safe Single-Writer Mutex (`.agents/state/.state_lock.mutex` — `P1-26`, `G-37`)**:
-   - Chiếm khóa bằng `fs.openSync(mutexPath, 'wx')`, ghi `{ ownerToken: crypto.randomUUID(), pid: process.pid, processStartTime, hostname: os.hostname(), createdAt, scope }`.
-   - Khi giải phóng trong `finally`, đọc lại `ownerToken` khớp mới được xóa khóa.
-   - Khi gặp `EEXIST`: kiểm tra `process.kill(pid, 0)`:
-     - Nếu không ném lỗi **hoặc ném `EPERM`** và `getProcessStartTime(pid) === lock.processStartTime` -> tiến trình giữ khóa đang sống, từ chối ngay (`CONCURRENT_STATE_MUTATION_BLOCKED`).
-     - Không bao giờ phá khóa chỉ vì quá thời gian chờ (`timeout`). Chỉ thu hồi khóa mồ côi khi `process.kill(pid, 0)` ném `ESRCH` hoặc `getProcessStartTime(pid) !== lock.processStartTime` (PID đã bị OS cấp lại cho tiến trình khác sau crash), bằng cách đổi tên nguyên tử sang file tạm trước khi xóa và mở lại `'wx'`.
-3. **Dual-Transaction & Re-Read CAS (`P0-13`, `P0-20` — `G-15`, `G-16`, `G-28`, `G-32`)**:
-   - `STATE_LOCK.json` (`schemaVersion: "1.3"`) tách riêng `planApprovalTxId` và `codeApprovalTxId` cùng bộ đếm đơn điệu `stateRevision`.
-   - Pre-Send Reset của `--mode review-code` giữ nguyên `approvalState: "PLAN_APPROVED"` + `planApprovalTxId` + `planHash`; chỉ xóa các trường `code*`.
-   - Ngay trước khi chuyển `writePhase: "PREPARING" -> "COMMITTED"`, đọc lại `STATE_LOCK.json` kiểm tra CAS (`stateRevision`), tính lại `planHash`, `HEAD === baseCommitOid`, và `captureCodeSnapshot('worktree').hash === codeSnapshotHash`; nếu lệch -> hủy giao dịch (`TOCTOU_DRIFT_DETECTED`).
-4. **Non-Self-Referential `LAST_REVIEW_BUNDLE.txt` & Request Envelope (`P0-21` — `G-35`, `G-38`)**:
-   - Cấu trúc `.agents/state/LAST_REVIEW_BUNDLE.txt` (chuẩn hóa LF, **tuyệt đối không chứa `BUNDLE_SHA256`**):
+1. **Chuẩn hóa `CRLF -> LF` Nhất quán**: Mọi dữ liệu văn bản trước khi băm đều chuẩn hóa `\r\n|\r -> \n`.
+2. **Giao Thức Khóa Hợp Tác Hai Chiều (`acquireStateMutex` <-> `recoverStateMutex` — `P0-26`, `P1-32`, `G-37`)**:
+   - **Hàm `getProcessStartTime(pid)`**: Truy vấn thời điểm khởi tạo tiến trình từ OS; nếu không đọc được hoặc không hỗ trợ -> trả về chuỗi `"UNKNOWN"`.
+   - **Luồng Writer Bình Thường (`acquireStateMutex`)**:
+     - **Bước W1 (Kiểm tra Recovery Gate trước)**: Nếu tồn tại `.agents/state/.state_lock.recovery.mutex` -> dừng ngay (`RECOVERY_IN_PROGRESS`).
+     - **Bước W2 (Mở khóa chính)**: Mở độc quyền `fs.openSync('.agents/state/.state_lock.mutex', 'wx')`, ghi `{ ownerToken: crypto.randomUUID(), pid: process.pid, processStartTime, hostname: os.hostname(), createdAt, scope }` + `fsyncSync`. Nếu gặp `EEXIST`:
+       - Nếu chủ khóa đang sống (`kill(pid, 0)` thành công hoặc ném `EPERM`) và `osStartTime === lock.processStartTime` (khác `"UNKNOWN"`) -> dừng ngay (`CONCURRENT_STATE_MUTATION_BLOCKED`).
+       - Nếu `osStartTime === "UNKNOWN"` hoặc `lock.processStartTime === "UNKNOWN"` khi PID còn tồn tại -> dừng fail-closed (`MUTEX_LIVENESS_UNKNOWN`).
+       - Nếu `ESRCH` hoặc xác nhận PID reuse (`osStartTime !== lock.processStartTime` và cả hai đều khác `"UNKNOWN"`), hoặc file khóa hỏng -> dừng fail-closed (`STALE_MUTEX_RECOVERY_REQUIRED`), **không tự thu hồi**.
+     - **Bước W3 (Kiểm tra kép sau khi mở khóa)**: Đọc lại ngay `.state_lock.recovery.mutex` và `.state_lock.mutex`: nếu `.state_lock.recovery.mutex` vừa xuất hiện hoặc `ownerToken` không khớp -> tự xóa `.state_lock.mutex` (chỉ khi `ownerToken` khớp) và dừng với `RECOVERY_IN_PROGRESS`.
+     - **Giải phóng (`finally`)**: Đọc lại `.state_lock.mutex`, chỉ `unlinkSync` khi `ownerToken` trùng khớp.
+   - **Luồng Thu Hồi Khóa Mồ Côi (`verify_guard.mjs --recover-mutex`)**:
+     - **Bước M1**: Mở độc quyền `fs.openSync('.agents/state/.state_lock.recovery.mutex', 'wx')` ghi `{ recoveryOwnerToken, pid, processStartTime, createdAt }` + `fsyncSync`. Nếu `EEXIST`: kiểm tra khóa recovery; nếu đang chạy -> báo `RECOVERY_ALREADY_IN_PROGRESS`; nếu bản thân khóa recovery bị mồ côi sau sự cố sập nguồn -> dừng fail-closed (`STALE_RECOVERY_MUTEX_MANUAL_INSPECTION_REQUIRED`) và in hướng dẫn vận hành (xác nhận không còn tiến trình workflow nào chạy, xóa thủ công `.state_lock.recovery.mutex`, rồi chạy lại `--recover-mutex`).
+     - **Bước M2 (trong `try ... finally` luôn giải phóng khóa recovery theo `recoveryOwnerToken`)**: Đọc `stat1 = fs.lstatSync(mutexPath, { bigint: true })` và `raw1 = fs.readFileSync(mutexPath)`. Kiểm tra liveness: nếu PID còn tồn tại mà `lock1.processStartTime === "UNKNOWN"` hoặc `osStartTime === "UNKNOWN"` -> từ chối (`MUTEX_LIVENESS_UNKNOWN` — `P1-32`); nếu chủ khóa đang sống -> từ chối (`MUTEX_OWNER_STILL_ALIVE`).
+     - **Bước M3**: Đọc lại `stat2` (`ino`, `size`, `mtimeNs`) và `raw2`; xác nhận `stat1.ino === stat2.ino && stat1.size === stat2.size && stat1.mtimeNs === stat2.mtimeNs && raw1.equals(raw2)` và `ownerToken === lock1.ownerToken` rồi thực hiện `fs.unlinkSync(mutexPath)`.
+3. **Điểm Tuyến Tính Hóa, Explicit Re-Read CAS & Tái Kiểm Chứng Hạ Lưu (`P0-27` — `G-15`, `G-28`, `G-32`)**:
+   - `STATE_LOCK.json` (`schemaVersion: "1.3"`) lưu `stateRevision` (số nguyên tăng đơn điệu), `activeTxId`, `planApprovalTxId`, `codeApprovalTxId`, `writePhase` (`"PREPARING" | "COMMITTED"`).
+   - **Bước 1 (`PREPARING`)**: Dưới `.state_lock.mutex`, ghi atomic `STATE_LOCK.json` với `writePhase: "PREPARING"`, `activeTxId: txId`, `stateRevision: rev + 1`.
+   - **Bước 2**: Ghi atomic file feedback kèm Single-Footer (và `LAST_REVIEW_BUNDLE.txt` ở `review-code`).
+   - **Bước 3 (Explicit Re-Read CAS)**: Vẫn dưới `.state_lock.mutex`, đọc lại `STATE_LOCK.json` từ đĩa và kiểm tra tường minh: `reRead.writePhase === "PREPARING" && reRead.stateRevision === rev + 1 && reRead.activeTxId === txId`, đồng thời kiểm tra lại `computeCanonicalPlanHash(PLAN_FILE) === expectedPlanHash`, `git rev-parse --verify HEAD === baseCommitOid`, và (ở `review-code`) `captureCodeSnapshot('worktree').hash === codeSnapshotHash`. Nếu bất kỳ điều kiện nào sai -> hủy giao dịch (`TOCTOU_DRIFT_DETECTED`).
+   - **Bước 4 (Linearization Point)**: Phép `fs.renameSync(tmp, STATE_LOCK.json)` (sau `fsyncSync`) chuyển `writePhase: "COMMITTED"`, `stateRevision: rev + 2`, chốt `planApprovalTxId` / `codeApprovalTxId` và xóa `activeTxId: ""`.
+   - **Tái kiểm chứng bắt buộc tại điểm tiêu thụ**: Vì mutex không khóa `.git/index`, `HEAD` hay worktree trước tác nhân bên ngoài sau Bước 3, `verifyPreCommitGuard()` và `--ci-verify` bắt buộc kiểm chứng lại toàn bộ chuỗi `HEAD === lock.baseCommitOid`, `planHash`, `reviewBundleHash`, Single-Footer (`TX`, `REQ`, `BUNDLE`, `SNAPSHOT`) và `captureCodeSnapshot('index' | 'commit') === lock.codeSnapshotHash` (`G-15`).
+4. **Non-Self-Referential `LAST_REVIEW_BUNDLE.txt` & Request Envelope (`P0-21` — `G-38`)**: Không nhúng `BUNDLE_SHA256` vào trong `LAST_REVIEW_BUNDLE.txt`; tính `reviewBundleHash = sha256(bundleBytes)` sau khi đóng file, gửi qua Request Envelope, lưu vào `STATE_LOCK.json` và `BUNDLE:` của footer.
+
+---
+
+### 3.2. Hợp Đồng 2: `CanonicalSnapshotManifest v1`, Git Attributes/Filters & Điều Kiện Tương Đương 3 Mode (`P0-23`, `P0-29`, `P1-31`)
+
+1. **Phân Định Rõ Phạm Vi Giữa Task 4 và Task 5 (Không Đổi ROADMAP, Không Phá Vỡ Schema)**:
+   - **Task 4** triển khai hoàn chỉnh đặc tả cố định `CanonicalSnapshotManifest v1`, bộ máy `captureCodeSnapshot` cho cả 3 mode (`worktree`, `index`, `commit`), đường ống `Buffer` `-z`, xử lý Git attributes/filters chuẩn Index và nghiệm thu `G-22`, `G-35`, `G-38`.
+   - **Task 5** mở rộng kiểm thử và gia cố các kịch bản Git biên phức tạp (`G-17`, `G-18`, `G-20`, `G-23`, `G-24`, `G-29`, `G-31`) **mà tuyệt đối không thay đổi định dạng byte của `CanonicalSnapshotManifest v1` đã khóa ở Task 4**.
+2. **Tập Ứng Viên Đầy Đủ & Đường Ống `Buffer` Không Mất Byte (`P0-29`, `P1-31`)**:
+   - Đọc `objectFormat = git rev-parse --show-object-format` (`sha1` / `sha256`).
+   - Không bao giờ truyền `<path>` qua chuỗi `argv` của Git subprocess. Đọc toàn bộ `baseTreeMap` từ `git ls-tree -r -z <baseCommitOid>` (`{ encoding: 'buffer' }`).
+   - Lập `targetStateMap` theo mode:
+     - `commit`: `git ls-tree -r -z <targetCommitOid>`.
+     - `index`: `git ls-files --stage -z` (nếu có unmerged stage `1..3` -> fail-closed `UNMERGED_INDEX_ENTRIES`) + kiểm tra `git status -z --porcelain=v1 -uall` (nếu có unstaged/untracked trong `effectiveReviewScope` -> fail-closed `DIRTY_WORKTREE_OR_UNTRACKED`).
+     - `worktree`: Hợp nhất các đường dẫn từ `git ls-files --stage -z` VÀ `git ls-files -z --others --exclude-standard` với `keys(baseTreeMap)`, lọc theo `effectiveReviewScope = unique(config.reviewScope U lock.allowedPaths)`. Do lấy hợp với `baseTreeMap` và `indexMap`, mọi thao tác xóa file (`ENOENT` khi `fs.lstatSync(absPathBuf)`), đổi kiểu file (`regular <-> symlink`), và file tracked trùng mẫu `.gitignore` đều được thu thập đầy đủ 100%. Nếu phát hiện thư mục con chứa `.git` (nested repo không khai báo) hoặc submodule/gitlink (`160000`) có `HEAD` thực tế lệch với OID trong Index/bẩn -> fail-closed (`SUBMODULE_DRIFT_OR_UNSUPPORTED`).
+3. **Thuật Toán Tính Git Blob Tương Thích Tuyệt Đối Với Git Index (`working-tree-encoding`, `filter`, `ident`, `text`, `eol`, `core.autocrlf`)**:
+   - Với symlink (`120000`): `git hash-object -t blob --stdin --no-filters` trên `fs.readlinkSync(absPathBuf, 'buffer')`.
+   - Với regular file trong `worktree`:
+     - Kế thừa `100755` từ `indexMap` (hoặc `baseTreeMap` nếu chưa stage) khi `core.filemode=false` trên Windows; kiểm tra bit `0o111` khi `core.filemode=true` trên POSIX.
+     - **Đường dẫn UTF-8 hợp lệ**: Bắt buộc gọi `git hash-object -t blob --stdin --path=<utf8PosixPath>` truyền `input: fs.readFileSync(absPathBuf)` (**cấm dùng `--no-filters`**). Lệnh này áp dụng chính xác cùng bộ quy tắc chuyển đổi của `git add` cho `.gitattributes` (`text`, `eol`, `ident`, `working-tree-encoding`, `filter.clean` / process filter) và `core.autocrlf`. Nếu lệnh trả `exitCode !== 0` -> fail-closed (`GIT_HASH_OBJECT_FAILED`).
+     - **Đường dẫn chứa byte non-UTF-8 (POSIX)**: Truy vấn `git check-attr -z --stdin filter ident working-tree-encoding text eol` (truyền `Buffer` qua `stdin`). Chỉ khi cả 5 thuộc tính đều là `"unspecified"`/`"unset"` VÀ `core.autocrlf === false` mới băm qua `git hash-object -t blob --stdin --no-filters`; nếu bất kỳ thuộc tính biến đổi nào có hiệu lực -> **fail-closed (`NON_UTF8_PATH_WITH_GIT_FILTERS_UNSUPPORTED`)**.
+4. **Định Nghĩa Tường Minh Điều Kiện Tương Đương Giữa 3 Mode (`worktree`, `index`, `commit`)**:
+   - Ba mode sinh ra cùng dãy byte `CanonicalSnapshotManifest v1` (`SNAPSHOT_SCHEMA:v1`, phân tách `\t` và `\n`, 6 cột `changeType`, `oldMode`, `newMode`, `oldBlobOid`, `newBlobOid`, `pathHex`) khi và chỉ khi thỏa mãn 3 điều kiện của chu trình hợp lệ:
+     1. Toàn bộ thay đổi trong `effectiveReviewScope` đã được `git add` sạch vào `.git/index` (không còn diff unstaged hay file untracked; `.git/index` không giữ blob cũ lệch với kết quả clean-filter hiện tại của `worktree`).
+     2. Các phép chuẩn hóa/clean-filter được cấu hình là **tất định** (cùng đầu vào `worktree` sinh cùng blob OID lúc review và lúc `git add`; nếu filter không tất định sinh blob khác trong Index -> `verifyPreCommitGuard` chặn ngay với `SNAPSHOT_MISMATCH` / `NON_DETERMINISTIC_OR_FAILED_FILTER`).
+     3. Commit `<targetCommitOid>` được tạo trực tiếp từ chính `.git/index` đó trên cha `HEAD === baseCommitOid` mà không sửa đổi cây đối tượng sau staging.
+
+---
+
+### 3.3. Hợp Đồng 3: Canonical `transitionGovernanceHash`, Rollback R2 Chống Drift & Hai Luồng Quản Trị (`P0-22`, `P0-28`, `P1-29`, `P1-33`, `P1-34`)
+
+#### 3.3.1. Lệnh `--advance-task <from> --to <to>`, Canonical Hash & `--recover-transition` (`P0-28`, `P1-33`, `P1-34` — `G-34`, `G-39`)
+1. **Định nghĩa Canonical `transitionGovernanceHash` Không Phụ Thuộc Vòng (`P1-34`)**:
+   - Chuẩn hóa LF (`\r\n|\r -> \n`) nội dung đích của 4 file quản trị ngoài lock (`.agents/state/CODE_REVIEW_FEEDBACK.md`, `.agents/state/CURRENT_PLAN.md`, `.agents/state/MENTOR_FEEDBACK.md`, `.agents/state/ROADMAP.md` — xếp theo thứ tự ASCII tăng dần) và băm UTF-8 chuỗi:
      ```text
-     CODE_REVIEW_REQUEST_ID: <codeReviewRequestId>
-     TASK_ID: <taskId>
-     BASE_COMMIT_OID: <baseCommitOid>
-     SNAPSHOT_SHA256: <codeSnapshotHash>
-     --- CANONICAL SNAPSHOT MANIFEST ---
-     <canonicalManifestBytes>
-     --- TEST EVIDENCE ---
-     <testCommand & exitCode & output>
-     --- COMPLETE DIFF & NEW FILES ---
-     <non-truncated contents of 100% changed/new files in effectiveReviewScope>
+     TRANSITION_GOV_SCHEMA:v1
+     FROM_TASK:<fromTaskId>
+     TO_TASK:<toTaskId>
+     BASE_OID:<transitionBaseOid>
+     APPROVED_COMMIT_OID:<approvedCodeCommitOid>
+     APPROVED_SNAPSHOT_SHA256:<approvedCodeSnapshotHash>
+     STATE_LOCK_CORE:<toTaskId>|PENDING|COMMITTED|TRANSITION|ALLOWED_COUNT:0
+     FILE:.agents/state/CODE_REVIEW_FEEDBACK.md:<sha256_lf>
+     FILE:.agents/state/CURRENT_PLAN.md:<sha256_lf>
+     FILE:.agents/state/MENTOR_FEEDBACK.md:<sha256_lf>
+     FILE:.agents/state/ROADMAP.md:<sha256_lf>
      ```
-   - Sau khi ghi xong `LAST_REVIEW_BUNDLE.txt`, tính `reviewBundleHash = sha256(bundleBytes)` (không sửa lại file bundle!).
-   - Gửi cho Mentor qua **Request Envelope** bên ngoài: dòng thông tin Envelope trong prompt chứa `REQUEST_ID: <codeReviewRequestId>` + `REVIEW_BUNDLE_SHA256: <reviewBundleHash>`, kèm đính kèm/nội dung nguyên bản `bundleBytes`.
-   - Lưu `reviewBundleHash` vào `STATE_LOCK.json` và nhúng `BUNDLE: <reviewBundleHash>` vào Single-Footer của `CODE_REVIEW_FEEDBACK.md`. `verifyPreCommitGuard()` kiểm chứng `sha256(fs.readFileSync(LAST_REVIEW_BUNDLE.txt)) === lock.reviewBundleHash === codeFooter.bundleHash` (hoàn toàn không có vòng tự tham chiếu — `G-38`).
+   - Loại trừ hoàn toàn bản thân `transitionEvidence` và `updatedAt` khỏi đầu vào băm (0 phụ thuộc vòng). Khi `verifyPreCommitGuard()` kiểm tra `GOVERNANCE_TASK_TRANSITION`, hàm dựng lại đúng chuỗi canonical này từ các blob đang staged trong Git Index để đối chiếu với `STATE_LOCK.json.transitionEvidence.transitionGovernanceHash`.
+2. **Schema Chặt Chẽ Của `.transition_journal.json` (`P1-33`)**:
+   - Ghi dưới `.state_lock.mutex` trước khi sửa file đầu tiên. Mỗi phần tử trong 5 file quản trị có dạng:
+     `{ relPath, existedBefore: boolean, beforeSha256: <64-hex | "MISSING">, beforeBase64: <string | null>, expectedAfterSha256: <64-hex> }`.
+   - Quy tắc bất biến: nếu `existedBefore === false` thì bắt buộc `beforeSha256 === "MISSING"` và `beforeBase64 === null`; nếu `existedBefore === true` thì `beforeSha256` là 64-hex thường và `sha256(Buffer.from(beforeBase64, 'base64')) === beforeSha256`.
+3. **Giao Thức `--recover-transition` Kèm Kiểm Tra Lại Từng File Ở Pha R2 (`P0-28`, `P1-33` — `G-39`)**:
+   - Chạy dưới khóa hợp tác `acquireStateMutex`.
+   - **Pha R0 (Journal Integrity Validation)**: Xác thực JSON schema, đủ 5 mục chuẩn, kiểm tra tính hợp lệ của `existedBefore`, sentinel `"MISSING"`, định dạng 64-hex và giải mã `beforeBase64` khớp `beforeSha256`. Nếu sai lệch bất kỳ trường nào -> **dừng ngay (`CORRUPT_TRANSITION_JOURNAL`) trước khi chạm vào bất kỳ file nào**.
+   - **Pha R1 (All-Files Pre-Check)**: Đọc cả 5 file trên đĩa (`"MISSING"` nếu `ENOENT`, ngược lại `sha256(bytes)`). Mọi file phải thuộc `{beforeSha256, expectedAfterSha256}`; nếu có file mang fingerprint thứ ba -> **dừng ngay (`TRANSITION_RECOVERY_DRIFTED`), 0 file bị ghi**.
+   - **Pha R2 (Per-File Just-In-Time Re-Check & Bounded Partial Rollback)**: Duyệt tuần tự từng file `i` chưa ở trạng thái `beforeSha256`:
+     - **Ngay trước lệnh `renameSync` (hoặc `unlinkSync` khi `existedBefore === false`) trên file `i`**, đọc và tính lại fingerprint hiện tại của chính file `i` trên đĩa.
+     - Nếu file `i` vừa bị tác nhân ngoài giao thức sửa thành fingerprint thứ ba sau Pha R1 -> **dừng khẩn cấp (`TRANSITION_RECOVERY_MID_FLIGHT_DRIFT`), tuyệt đối không ghi đè/xóa file `i`, giữ nguyên `.transition_journal.json`** (để toàn bộ cổng Guard tiếp tục khóa fail-closed) và ghi log danh sách rõ ràng: các file `1..(i-1)` đã rollback một phần về `beforeSha256`, còn file `i` bị drift được bảo toàn nguyên trạng để người vận hành xử lý thủ công.
+     - Chỉ khi hoàn tất 5/5 file và xác nhận lại cả 5 đều khớp `beforeSha256` mới `unlinkSync('.transition_journal.json')`.
+
+#### 3.3.2. Hai Hợp Đồng Commit Quản Trị Tách Biệt (`GOVERNANCE_TASK_TRANSITION` & `GOVERNANCE_PLAN_UPDATE` — `P0-22`, `P1-29`, `G-34`)
+- **`GOVERNANCE_TASK_TRANSITION`**: Không còn `.transition_journal.json`; `stagedPaths ⊆ transitionCommitAllowlist`; `HEAD === approvedCodeCommitOid && HEAD^1 === transitionBaseOid` (vé dùng 1 lần); khớp snapshot commit và khớp canonical `transitionGovernanceHash`.
+- **`GOVERNANCE_PLAN_UPDATE`**: Cùng `taskId` với `HEAD`; `ROADMAP.md` không đổi; trạng thái `STATE_LOCK.json` hiệu lực bắt buộc là `approvalState === "PENDING"`, `writePhase === "COMMITTED"`, `allowedPaths: []`, xóa rỗng `plan*`/`code*`.
 
 ---
 
-### 3.2. Hợp Đồng 2: `CanonicalSnapshotManifest v1` Cấp Độ Byte Chung Cho Cả 3 Mode Ngay Tại Task 4 (`P0-16`, `P0-18`, `P0-23`)
+### 3.4. Hợp Đồng 4: Verified Migration `--bootstrap-v13` Duy Nhất & Dual-Path Protection (`P0-11`, `P0-19`, `P1-35`)
 
-Hàm chỉ đọc `captureCodeSnapshot(root, cfg, { mode: 'worktree' | 'index' | 'commit', baseCommitOid, targetCommitOid, effectiveScope })` được triển khai đầy đủ quy tắc chuẩn hóa cấp độ byte ngay trong **Task 4**:
-
-1. **Phát hiện Định dạng OID của Repo**: Lấy `objectFormat = git rev-parse --show-object-format` (`"sha1"` -> 40 hex thường, `"sha256"` -> 64 hex thường; giá trị rỗng ký hiệu `"ZERO"`).
-2. ** Biểu diễn & Sắp xếp Đường dẫn Không Mất Dữ Liệu (`Raw Path Bytes`)**:
-   - Đọc đường dẫn từ các lệnh Git có cờ `-z` (`NUL`-delimited raw `Buffer`, không qua giải mã chuỗi có thể mất byte hoặc dính quote).
-   - Chuẩn hóa dấu phân cách về `/` (`0x2f`), lọc các đường dẫn thuộc `effectiveReviewScope = unique(config.reviewScope U lock.allowedPaths)`.
-   - Sắp xếp danh sách entries tăng dần tuyệt đối theo `Buffer.compare(a.rawPathBytes, b.rawPathBytes)`.
-   - Mã hóa đường dẫn trong manifest thành `pathHex = rawPathBytes.toString('hex')` (chữ thường).
-3. **Quy tắc Trích xuất 6 Trường Duy Nhất Cho Mỗi Entry (Không Có Metadata Riêng Của Từng Mode)**:
-   - Với mỗi `rawPathBytes` có thay đổi giữa `<baseCommitOid>` và trạng thái đích (`worktree` / `index` / `targetCommitOid`):
-     - **`oldMode` & `oldBlobOid`**: Đọc từ `<baseCommitOid>` qua `git ls-tree -z <baseCommitOid> -- <path>`. Nếu không tồn tại ở `<baseCommitOid>` -> `oldMode = "000000"`, `oldBlobOid = "ZERO"`.
-     - **`newMode` & `newBlobOid`**:
-       - Nếu không tồn tại ở trạng thái đích -> `newMode = "000000"`, `newBlobOid = "ZERO"`.
-       - Ở `mode === 'commit'`: Đọc từ `git ls-tree -z <targetCommitOid> -- <path>` (`100644`, `100755`, `120000`, `160000` và OID chữ thường).
-       - Ở `mode === 'index'`: Đọc từ `git ls-files --stage -z -- <path>` (bắt buộc stage `0`; từ chối nếu có unmerged stage `1..3` hoặc có thay đổi unstaged/untracked trong `effectiveReviewScope`).
-       - Ở `mode === 'worktree'`:
-         - Nếu `lstat.isSymbolicLink()`: `newMode = "120000"`, tính `newBlobOid` bằng `git hash-object -t blob --stdin` trên buffer đích `fs.readlinkSync(absPath, 'buffer')`.
-         - Nếu thư mục gitlink/submodule: `newMode = "160000"`, đọc HEAD OID của submodule.
-         - Nếu regular file: trên hệ thống `core.filemode=false` (Windows), nếu đường dẫn đang có mode `100755` trong Git Index (hoặc `<baseCommitOid>` khi chưa stage) thì giữ `newMode = "100755"`, ngược lại `"100644"`; trên hệ thống `core.filemode=true` (POSIX), kiểm tra `(lstat.mode & 0o111) !== 0 ? "100755" : "100644"`. Tính `newBlobOid` qua `git hash-object --stdin --path="<posixPath>"` (bắt buộc `exitCode === 0`, chuyển về chữ thường).
-     - **Suy diễn tất định `changeType` & Loại bỏ No-op**:
-       - Nếu `oldMode === newMode && oldBlobOid === newBlobOid` -> bỏ qua entry (không đưa vào manifest).
-       - Nếu `oldMode === "000000"` -> `changeType = "A"`.
-       - Nếu `newMode === "000000"` -> `changeType = "D"`.
-       - Nếu 3 ký tự đầu của `oldMode` khác 3 ký tự đầu của `newMode` (ví dụ regular file `100xxx` <-> symlink `120000` <-> gitlink `160000`) -> `changeType = "T"`.
-       - Ngược lại -> `changeType = "M"`.
-4. **Định dạng Byte Chuẩn `CanonicalSnapshotManifest v1` (LF `\n`)**:
-   ```text
-   SNAPSHOT_SCHEMA:v1
-   OBJECT_HASH_ALGO:<sha1|sha256>
-   BASE_COMMIT_OID:<lower-hex>
-   SCOPE_HEX:<comma-separated sorted lower-hex of normalized effectiveReviewScope>
-   ENTRY_COUNT:<decimal>
-   ENTRY	<changeType>	<oldMode>	<newMode>	<oldBlobOid>	<newBlobOid>	<pathHex>
-   ```
-   - `codeSnapshotHash = crypto.createHash('sha256').update(Buffer.from(manifestText, 'utf8')).digest('hex')`.
-   - **Định lý Bất biến Cấp Độ Byte (`G-22` kiểm chứng ngay tại Task 4)**: Với cùng một tập thay đổi hợp lệ đã được stage sạch và commit lên `<baseCommitOid>`, chuỗi `manifestText` sinh ra từ `worktree`, `index`, và `commit` **trùng khớp 100% từng byte (`Buffer.equals === true`)**!
-
----
-
-### 3.3. Hợp Đồng 3: Xác Thực `transitionEvidence`, Atomic Journal & Hai Luồng Quản Trị Riêng Biệt (`P0-17`, `P0-18`, `P0-22`, `P1-24`, `P1-25`, `P1-27`)
-
-#### 3.3.1. Lệnh `--advance-task <from> --to <to>` Kèm Atomic Transition Journal (`P0-18`, `P0-22`, `P1-27` — `G-34`, `G-39`)
-1. **Điều kiện tiên quyết trước khi chuyển task**:
-   - Đang không tồn tại file `.agents/state/.transition_journal.json` dở dang (nếu có -> báo `INCOMPLETE_TASK_TRANSITION`, yêu cầu chạy `--recover-transition`).
-   - `lock.taskId === <from>`, `lock.approvalState === "CODE_APPROVED"`, `lock.writePhase === "COMMITTED"`.
-   - `HEAD` không phải merge commit (`git rev-parse --verify HEAD^2` thất bại), cha trực tiếp `git rev-parse --verify HEAD^1 === lock.baseCommitOid`, và `captureCodeSnapshot('commit', lock.baseCommitOid, 'HEAD').hash === lock.codeSnapshotHash`.
-   - `effectiveReviewScope` sạch hoàn toàn (`0` staged/unstaged/untracked).
-2. **Giao dịch Chuyển Task Có Nhật Ký Khôi Phục (`.transition_journal.json` — `P1-27`)**:
-   - Giữ khóa `.state_lock.mutex`.
-   - **Bước J1**: Ghi atomic `.agents/state/.transition_journal.json` lưu nội dung gốc (base64) + SHA-256 của cả 5 file quản trị (`ROADMAP.md`, `CURRENT_PLAN.md`, `STATE_LOCK.json`, `MENTOR_FEEDBACK.md`, `CODE_REVIEW_FEEDBACK.md`) tại thời điểm bắt đầu.
-   - **Bước J2**: Tính nội dung mới cho `ROADMAP.md` (chỉ đổi dòng `[ ] ... Task <from>` thành `[x]` và xác nhận mục `[ ]` kế tiếp là `<to>`), `CURRENT_PLAN.md` (chỉ đổi `- **Active Task**: \`<to>\``), `MENTOR_FEEDBACK.md` (`STATUS: PENDING`), `CODE_REVIEW_FEEDBACK.md` (`CODE_STATUS: PENDING`).
-   - **Bước J3**: Tính `transitionGovernanceHash = sha256` của manifest 4 file quản trị trên, và tạo trường `transitionEvidence` trong `STATE_LOCK.json` mới (`taskId: <to>`, `approvalState: "PENDING"`, `allowedPaths: []`, xóa sạch `plan*`/`code*`):
-     ```json
-     "transitionEvidence": {
-       "fromTaskId": "task-4",
-       "toTaskId": "task-5",
-       "transitionBaseOid": "<lock.baseCommitOid>",
-       "approvedCodeCommitOid": "<HEAD OID>",
-       "approvedCodeSnapshotHash": "<lock.codeSnapshotHash>",
-       "transitionGovernanceHash": "<sha256>",
-       "transitionTxId": "tx-trans-...",
-       "createdAt": "<ISO>"
-     }
-     ```
-   - **Bước J4**: Ghi toàn bộ các file `.tmp` kèm `fsync`, rename lần lượt, chốt `STATE_LOCK.json` (`writePhase: "COMMITTED"`, `lastWriteScope: "TRANSITION"`), rồi xóa `.transition_journal.json`. Nếu có lỗi bất kỳ trước khi xóa journal -> giữ nguyên journal để Guard chặn mọi thao tác tiếp theo và cho phép `--recover-transition` khôi phục chính xác 100% về trước Bước J1 (`G-39`).
-
-#### 3.3.2. Tách Biệt Tuyệt Đối Hai Luồng Commit Quản Trị Trong `verifyPreCommitGuard()` (`P0-17`, `P0-22` — `G-34`)
-Nếu tập file staged trong Git Index không chạm bất kỳ file mã nguồn/hạ tầng nào, `verifyPreCommitGuard()` **không bao giờ cho qua chỉ vì `approvalState === "PENDING"`**, mà chỉ chấp nhận đúng 1 trong 2 hợp đồng chặt chẽ sau:
-1. **Hợp đồng `GOVERNANCE_TASK_TRANSITION` (Commit chuyển task sau `--advance-task`)**:
-   - Không tồn tại `.transition_journal.json`.
-   - Tập đường dẫn staged `⊆ transitionCommitAllowlist` (`ROADMAP.md`, `CURRENT_PLAN.md`, `HANDOFF.md`, `SESSION_MAP.json`, `STATE_LOCK.json`, `MENTOR_FEEDBACK.md`, `CODE_REVIEW_FEEDBACK.md`) và không chứa bất kỳ đường dẫn nào khác.
-   - Đọc `STATE_LOCK.json` từ Git Index: bắt buộc có `lastWriteScope === "TRANSITION"`, `approvalState === "PENDING"`, `writePhase === "COMMITTED"`, `allowedPaths.length === 0`, mọi trường `plan*`/`code*` rỗng, và có `transitionEvidence` hợp lệ thỏa mãn:
-     - `git rev-parse --verify HEAD === transitionEvidence.approvedCodeCommitOid` VÀ `git rev-parse --verify HEAD^1 === transitionEvidence.transitionBaseOid` (chứng minh bằng chứng chưa bị tiêu thụ bởi một commit trước đó — ngay sau khi commit này hoàn tất, `HEAD` đổi sang OID mới nên `transitionEvidence` tự động hết hiệu lực vĩnh viễn, 0 khả năng replay!).
-     - `captureCodeSnapshot('commit', transitionEvidence.transitionBaseOid, 'HEAD').hash === transitionEvidence.approvedCodeSnapshotHash`.
-     - Đối chiếu nội dung staged trong Index của `ROADMAP.md` so với `HEAD:ROADMAP.md` chỉ thay đổi duy nhất checkbox `[ ] -> [x]` của `fromTaskId` và mục `[ ]` đầu tiên là `toTaskId`; `transitionGovernanceHash` khớp tuyệt đối với các blob staged!
-2. **Hợp đồng `GOVERNANCE_PLAN_UPDATE` (Commit lưu bản nháp kế hoạch/handoff của CÙNG task trước khi code)**:
-   - Tập đường dẫn staged `⊆ planUpdateAllowlist` (chỉ gồm `.agents/state/CURRENT_PLAN.md`, `.agents/state/HANDOFF.md`, `.agents/state/SESSION_MAP.json`, và tùy chọn `MENTOR_FEEDBACK.md` / `STATE_LOCK.json` ở trạng thái `PENDING`).
-   - **Cấm sửa `ROADMAP.md` và cấm nâng quyền**: `ROADMAP.md` không được nằm trong staged diff (hoặc giống hệt `HEAD:ROADMAP.md`); `Active Task` trong `CURRENT_PLAN.md` staged và `taskId` trong `STATE_LOCK.json` staged phải trùng khớp với mục `[ ]` đầu tiên hiện hành; `STATE_LOCK.json` (nếu staged) phải có `approvalState === "PENDING"`, `allowedPaths: []`, xóa rỗng `plan*`/`code*`.
-
----
-
-### 3.4. Hợp Đồng 4: Verified Migration (`--bootstrap-v13`), Drift-Safe Backup & Dual-Path Protection (`P0-11`, `P0-19`, `P1-24`, `P1-25`)
-
-1. **Migration `--bootstrap-v13` (Alias `--bootstrap-v12`)**:
-   - Idempotent (`exit 0`) chỉ khi `schemaVersion === "1.3"`, cấu trúc hợp lệ đầy đủ VÀ `writePhase === "COMMITTED"` (nếu `PREPARING` -> `exit 2`).
-   - Mặc định chuyển về `approvalState: "PENDING"`, `provenanceLevel: "NONE"` (`G-30b`, `G-33`, `G-36`). Chỉ khi có cờ `--preserve-local-tier1-consistency` trên fixture nhất quán 100% mới giữ `PLAN_APPROVED` với nhãn `provenanceLevel: "TIER1_LOCAL_CONSISTENCY"` (`G-30a`).
-   - Sao lưu và khôi phục giữ khóa `.state_lock.mutex`, xác thực `backup-manifest.json` và từ chối ghi đè nếu đích đã drift (`RESTORE_TARGET_DRIFTED` — `G-30c`).
+1. **Chỉ hỗ trợ `--bootstrap-v13` (`P1-35`)**: Bỏ hoàn toàn alias `--bootstrap-v12` (truyền `--bootstrap-v12` trả `exit 2` kèm thông báo dùng `--bootstrap-v13`). Mặc định hạ về `approvalState: "PENDING"`, `allowedPaths: []`, `provenanceLevel: "NONE"` (`G-30b`, `G-33`, `G-36`); chỉ giữ `PLAN_APPROVED` (`TIER1_LOCAL_CONSISTENCY`) khi có `--preserve-local-tier1-consistency` và nhất quán 100% (`G-30a`); `--restore-backup` chặn `RESTORE_TARGET_DRIFTED` (`G-30c`).
 2. **Dual-Path Zone Policy & Self-Contained Verifier**: Kiểm tra cả `logicalRel` và `realRel` (`G-27`); `verify_guard.mjs` chỉ import `node:*` (`G-25`).
 
 ---
@@ -174,40 +151,41 @@ Nếu tập file staged trong Git Index không chạm bất kỳ file mã nguồ
 
 ---
 
-### Phân Bổ Chính Xác 39 Nhóm ID / 41 Test Cases Thực Thi (`P1-22`, `P1-23`, `P1-28`)
+### Phân Bổ Chính Xác 39 Nhóm ID / 41 Test Cases Thực Thi (Giữ Nguyên Tổng Số, Mở Rộng Sub-Assertions Bắt Buộc)
 
 | Task | Các Nhóm ID Kiểm Thử | Số Nhóm ID | Số Test Cases Thực Thi | Yêu Cầu Nghiệm Thu |
 | :--- | :--- | :---: | :---: | :--- |
-| **Task 4** | `G-1`..`G-16` (16), `G-22` (1 — chứng minh 3 mode byte-identical ngay Task 4), `G-26` (1), `G-28` (1), `G-30` [`G-30a`, `G-30b`, `G-30c`] (1 nhóm / 3 cases), `G-32`..`G-39` (8) | **28 nhóm** | **30 cases** | **`30/30 PASS \| 0 FAIL \| 0 SKIP`** |
+| **Task 4** | `G-1`..`G-16` (16), `G-22` (1), `G-26` (1), `G-28` (1), `G-30` [`G-30a`, `G-30b`, `G-30c`] (1 nhóm / 3 cases), `G-32`..`G-39` (8) | **28 nhóm** | **30 cases** | **`30/30 PASS \| 0 FAIL \| 0 SKIP`** |
 | **Task 5** | `G-17`, `G-18`, `G-20`, `G-23`, `G-24`, `G-29`, `G-31` | **7 nhóm** | **7 cases** | **`7/7 PASS \| 0 FAIL`** (unit mock symlink `0 SKIP` + real symlink test) |
 | **Task 6** | `G-19`, `G-21`, `G-25`, `G-27` | **4 nhóm** | **4 cases** | **`4/4 PASS \| 0 FAIL`** (unit `resolveDualTargetPaths` `0 SKIP` + real symlink test) |
 | **Task 7** | Tổng hợp toàn bộ **`G-1` -> `G-39`** (`41` test cases thực thi) + tài liệu `README.md` | **39 nhóm** | **41 cases** | **`41/41 cases`**, `npm test` đạt `0 FAIL`, `exitCode === 0` |
 
-*(Kiểm chứng tổng số học: Nhóm ID = `28 + 7 + 4 = 39` nhóm [`G-1`..`G-39`]; Test cases thực thi = `30 + 7 + 4 = 41` cases [do nhóm `G-30` gồm 3 cases độc lập `G-30a`, `G-30b`, `G-30c`]).*
+*(Nguyên tắc kế toán minh bạch: Các kịch bản bổ sung của `G-15`, `G-22`, `G-37`, `G-39` được tích hợp làm các sub-assertions tuần tự bắt buộc bên trong chính hàm test của nhóm đó — thất bại bất kỳ sub-assertion nào làm FAIL toàn bộ test case đó — giữ nguyên chính xác `30` test cases thực thi ở Task 4 và `41` test cases thực thi toàn cục. Nếu khi code tách thêm hàm test độc lập mới, bắt buộc cập nhật đồng bộ con số tổng trong runner và báo cáo, tuyệt đối không khai khống `41/41`).*
 
 ---
 
 ## 5. Danh Mục Đầy Đủ 39 Nhóm Kiểm Thử (`41 Test Cases`: `G-1` -> `G-39`)
 
-| Mã Test | Task | Kịch bản Kiểm thử Độc lập (trên Git repo tạm cô lập) | Kỳ vọng |
+| Mã Test | Task | Kịch bản Kiểm thử Độc lập & Sub-Assertions Bắt Buộc | Kỳ vọng |
 | :--- | :---: | :--- | :---: |
 | **G-1 -> G-4** | Task 4 | Thiếu `planHash` (G-1), sửa `CURRENT_PLAN.md` 1 byte/CRLF (G-2), lệch footer hash (G-3), và Plan Approval hợp lệ (G-4) | `REJECT` (1-3) / `ALLOW` (4) |
 | **G-5 -> G-9** | Task 4 | Thiếu `CODE_APPROVED`/footer (G-5), file untracked/unstaged mới (G-6), lệch Git Index blob (G-7), Mixed-Scope commit (G-8), và pre-commit hợp lệ (G-9) | `REJECT` (5-8) / `ALLOW` (9) |
-| **G-10 -> G-16** | Task 4 | Xóa footer (G-10), 2 footer hoặc thêm 1 footer sai cú pháp (G-11), `taskId` cũ (G-12), JSON/schema lỗi (G-13), migration từ `codeDiffHash` cũ (G-14), TOCTOU drift trước `COMMITTED` (G-15), phản hồi request ID cũ đến muộn (G-16) | `REJECT` / Không cấp `CODE_APPROVED` |
+| **G-10 -> G-14, G-16** | Task 4 | Xóa footer (G-10), 2 footer/sai cú pháp (G-11), `taskId` cũ (G-12), JSON/schema lỗi (G-13), migration `codeDiffHash` cũ (G-14), phản hồi request ID cũ đến muộn (G-16) | `REJECT` / Không cấp `CODE_APPROVED` |
+| **G-15** | Task 4 | **TOCTOU & Post-CAS Revalidation (`P0-27`)**: (a) Thay đổi `stateRevision` / `activeTxId` / worktree trước Bước 4 CAS -> hủy giao dịch (`TOCTOU_DRIFT_DETECTED`); (b) Thay đổi Git Index hoặc dịch `HEAD` ngay quanh/sau thời điểm ghi `COMMITTED` -> bị `verifyPreCommitGuard()` phát hiện và chặn, không dùng lại approval cũ cho trạng thái mới | `REJECT` cả trước và sau CAS |
 | **G-17 -> G-20** | Task 5 (19: Task 6) | Partial staging (G-17), đổi `fileMode`/symlink (G-18), sửa `.agents/config.json` trái phép (G-19 — Task 6), đổi `testCommand` sau review (G-20) | `REJECT` |
 | **G-21** | Task 6 | Commit bypass `--no-verify` bị phát hiện bởi `--ci-verify` | `REJECT` |
-| **G-22** | **Task 4** | Cùng một thay đổi hợp lệ (gồm thêm, sửa, xóa, file thực thi) được xuất `CanonicalSnapshotManifest v1` ở cả 3 mode `worktree`, `index`, `commit` | **`Buffer.equals` của manifest 3 mode bằng `true` tuyệt đối (trùng 100% từng byte)** |
-| **G-23 -> G-25** | Task 5 & 6 | `HEAD` dịch chuyển trước commit (G-23), CI truyền sai base (G-24), PR tự sửa `verify_guard.mjs` bị phát hiện bởi verifier chuẩn (G-25) | `REJECT` |
+| **G-22** | **Task 4** | **Snapshot Equivalence, Git Attributes & Filters (`P0-29`, `P1-31`)**: (a) Positive test với thêm, sửa, xóa, file thực thi VÀ chuẩn hóa `.gitattributes` hợp lệ (`text=auto eol=lf` / `working-tree-encoding`) -> `worktree`, `index`, `commit` xuất `CanonicalSnapshotManifest v1` trùng 100% từng byte (`Buffer.equals === true`); (b) Negative test với clean filter không tất định hoặc `.git/index` lệch blob với `worktree` -> phát hiện lệch / fail-closed; (c) Đường dẫn non-UTF-8 bảo toàn raw bytes khi không có filter, và fail-closed (`NON_UTF8_PATH_WITH_GIT_FILTERS_UNSUPPORTED`) khi gắn thuộc tính biến đổi | **Tương đương 100% hoặc Fail-Closed đúng hợp đồng** |
+| **G-23 -> G-25** | Task 5 & 6 | `HEAD` dịch chuyển trước commit (G-23), CI truyền sai base (G-24), PR tự sửa `verify_guard.mjs` bị phát hiện bởi verifier chuẩn từ `origin/master` (G-25) | `REJECT` |
 | **G-26 -> G-29** | Task 4, 5, 6 | Dùng lại lock `task-4` cho `task-5` (G-26), symlink nội bộ `src/link -> ../.agents/scripts/` (G-27), torn-write `writePhase === "PREPARING"` (G-28), `git mv` vượt ranh giới scope (G-29) | `REJECT` (26-28) / Chuẩn xác (29) |
-| **G-30a** | Task 4 | `--bootstrap-v13 --preserve-local-tier1-consistency` trên fixture Tier-1 nhất quán -> giữ `PLAN_APPROVED` (`TIER1_LOCAL_CONSISTENCY`), chạy lại Idempotent (`exit 0`), nhưng từ chối nếu đang `PREPARING` | `ALLOW` & Idempotent |
-| **G-30b** | Task 4 | `--bootstrap-v13` mặc định (không cờ) trên lock cũ -> nâng schema `"1.3"` ở trạng thái `approvalState: "PENDING"`, `provenanceLevel: "NONE"` | `PENDING` (Không tự cấp quyền) |
+| **G-30a** | Task 4 | `--bootstrap-v13 --preserve-local-tier1-consistency` trên fixture Tier-1 nhất quán -> giữ `PLAN_APPROVED` (`TIER1_LOCAL_CONSISTENCY`), Idempotent (`exit 0`), từ chối nếu `PREPARING`; từ chối cờ cũ `--bootstrap-v12` (`P1-35`) | `ALLOW` & Chặn `--bootstrap-v12` |
+| **G-30b** | Task 4 | `--bootstrap-v13` mặc định (không cờ) trên lock cũ -> nâng schema `"1.3"` ở trạng thái `approvalState: "PENDING"`, `allowedPaths: []`, `provenanceLevel: "NONE"` | `PENDING` (Không tự cấp quyền) |
 | **G-30c** | Task 4 | `--restore-backup` xác thực SHA-256 của `backup-manifest.json` và từ chối tự động ghi đè khi working tree đã phát sinh thay đổi mới ngoài giao dịch | `REJECT` (`RESTORE_TARGET_DRIFTED`) |
-| **G-31** | Task 5 | Clean filter không tất định sinh ra blob trong Index khác với `worktree` lúc review | `REJECT` (`NON_DETERMINISTIC_OR_FAILED_FILTER`) |
+| **G-31** | Task 5 | Clean filter không tất định sinh ra blob trong Index khác với `worktree` lúc review trong luồng `review-code -> git add -> pre-commit` | `REJECT` (`NON_DETERMINISTIC_OR_FAILED_FILTER`) |
 | **G-32** | Task 4 | Duyệt Plan (`planApprovalTxId = tx-plan-A`), sau đó duyệt Code (`codeApprovalTxId = tx-code-B`) | **Cả `verifyPlanGuard()` lẫn `verifyPreCommitGuard()` đều PASS** |
 | **G-33** | Task 4 | Kế hoạch A được duyệt dưới lock cũ, sửa thành kế hoạch B rồi chạy `--bootstrap-v13 --preserve-local-tier1-consistency` | **Không cấp `PLAN_APPROVED` cho B; chuyển về `PENDING`** |
-| **G-34** | Task 4 | Kiểm chứng cả 2 nhánh quản trị (`P0-22`): (1) `--advance-task` tạo `transitionEvidence` -> Governance Transition Commit PASS 1 lần và không thể replay lần 2; (2) Worker tự chế bộ 7 file quản trị `PENDING` giả mạo đổi `ROADMAP.md` không qua `--advance-task` -> bị **REJECT**; (3) `GOVERNANCE_PLAN_UPDATE` sửa `CURRENT_PLAN.md` cùng task PASS nhưng kèm `ROADMAP.md` hoặc `allowedPaths` bị **REJECT** | Đúng hợp đồng `P0-22` |
+| **G-34** | Task 4 | Kiểm chứng 2 hợp đồng quản trị (`P0-22`, `P1-29`, `P1-34`): (1) `--advance-task` sinh canonical `transitionGovernanceHash` -> Governance Transition Commit PASS 1 lần, replay lần 2 bị **REJECT**; (2) tự chế 7 file quản trị `PENDING` đổi `ROADMAP.md` không qua `--advance-task` bị **REJECT**; (3) `GOVERNANCE_PLAN_UPDATE` cùng task với `PENDING` + `allowedPaths: []` PASS, nhưng sửa `ROADMAP.md` hoặc giữ `allowedPaths` khác `[]` bị **REJECT** | Đúng hợp đồng `P0-22`, `P1-29`, `P1-34` |
 | **G-35** | Task 4 | Task 4 sửa `verify_guard.mjs`, `ask_mentor.mjs` và `tests/guard_integrity.test.js`; kiểm tra `effectiveReviewScope` và thử stage lệch 1 dòng trong `verify_guard.mjs` | **Tất cả file hạ tầng nằm trong snapshot; stage lệch bị REJECT** |
 | **G-36** | Task 4 | Chạy `--bootstrap-v13` với feedback cũ `STATUS: APPROVED` nhưng thiếu `planHash` khớp nội dung | **Chuyển về `PENDING`, không tự cấp approval** |
-| **G-37** | Task 4 | Kiểm thử Mutex & CAS (`P1-26`): (1) Tiến trình sống (kể cả giả lập `EPERM`) giữ khóa -> writer thứ 2 bị chặn, không tự phá khóa theo timeout; (2) Khóa mồ côi có `ESRCH` hoặc lệch `processStartTime` (PID reuse) -> thu hồi an toàn; (3) Mở khóa sai `ownerToken` bị từ chối | Đúng hợp đồng `P0-20` & `P1-26` |
-| **G-38** | Task 4 | Kiểm chứng `LAST_REVIEW_BUNDLE.txt` không tự tham chiếu (`P0-21`): file lưu trên đĩa không chứa `BUNDLE_SHA256`, `sha256(bundleBytes)` khớp chính xác với Request Envelope, `STATE_LOCK.json.reviewBundleHash` và `BUNDLE:` trong footer; sửa 1 byte của bundle bị `verifyPreCommitGuard()` chặn ngay | **PASS khi nguyên vẹn / REJECT khi lệch 1 byte** |
-| **G-39** | Task 4 | Giả lập lỗi sập tiến trình giữa chừng khi đang chạy `--advance-task` (để lại `.transition_journal.json`) -> mọi lệnh Guard/commit tiếp theo đều **FAIL-CLOSED (`INCOMPLETE_TASK_TRANSITION`)** cho đến khi chạy `--recover-transition` khôi phục nguyên vẹn 100% cả 5 file quản trị | **FAIL-CLOSED khi dở dang & Khôi phục 100% byte-exact** |
+| **G-37** | Task 4 | **Cooperative Mutex & Recovery Stress Test (`P0-26`, `P1-32`)**: (1) Tiến trình sống (`EPERM` / khớp `processStartTime`) chặn writer thứ 2; (2) `processStartTime === "UNKNOWN"` fail-closed (`MUTEX_LIVENESS_UNKNOWN`); (3) Khóa `.state_lock.mutex` mồ côi khiến writer bình thường fail-closed (`STALE_MUTEX_RECOVERY_REQUIRED`); (4) Stress đa tiến trình: writer bình thường tranh chấp đúng lúc `--recover-mutex` đang chạy + trường hợp `.state_lock.recovery.mutex` bị ngắt mồ côi (`STALE_RECOVERY_MUTEX_MANUAL_INSPECTION_REQUIRED`) -> không bao giờ xuất hiện 2 writer hợp tác đồng thời; (5) Sai `ownerToken` không xóa được khóa | Đúng hợp đồng `P0-26` & `P1-32` |
+| **G-38** | Task 4 | Kiểm chứng `LAST_REVIEW_BUNDLE.txt` không tự tham chiếu (`P0-21`): không chứa `BUNDLE_SHA256`, `sha256(bundleBytes)` khớp Envelope + `STATE_LOCK.json` + footer `BUNDLE:`; sửa 1 byte bị chặn | **PASS khi nguyên vẹn / REJECT khi lệch 1 byte** |
+| **G-39** | Task 4 | **Transition Journal Validation & Mid-R2 Drift Protection (`P0-28`, `P1-33`)**: (1) Journal chứa hash sai / Base64 hỏng / lệch sentinel `"MISSING"` -> bị chặn ngay ở Pha R0 (`CORRUPT_TRANSITION_JOURNAL`) trước mọi thao tác ghi; (2) Crash sau 3/5 file (không có drift) -> `--recover-transition` khôi phục 100% byte-exact cả 5 file; (3) Drift trước Pha R1 -> từ chối `TRANSITION_RECOVERY_DRIFTED` (0 file bị ghi); (4) **Drift xuất hiện sau Pha R1 nhưng ngay trước khi thay thế file `#4` ở Pha R2 -> dừng khẩn cấp (`TRANSITION_RECOVERY_MID_FLIGHT_DRIFT`), giữ journal, tuyệt đối không ghi đè file `#4`** | **Bảo toàn dữ liệu 100% ở cả Pha R0, R1 và R2** |
