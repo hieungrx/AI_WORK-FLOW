@@ -1,38 +1,18 @@
 {
   "projectName": "AI-WORKSPACE",
-  "projectUrl": "https://chatgpt.com/g/g-p-6ad3b17e96f88191bf0fda969044d956/project",
-  "geminiThreadUrl": "https://gemini.google.com/app/8857045b82c96f46",
+  "projectUrl": "https://chatgpt.com/g/g-p-6ad3b17e96f88191bf0fda969044d956-ai-workspace/c/6aef3246-5064-83ec-99a8-624e9de3ca05",
+  "geminiThreadUrl": "https://gemini.google.com/app/bba140fe8808ed1b",
   "currentTask": "task-4",
   "threads": {
-    "task-2": {
-      "url": "https://chatgpt.com/c/6aede65a-bc54-83ec-b342-197769054c8c",
-      "rounds": 0,
-      "updatedAt": "2026-11-06T15:30:15.000Z"
-    },
-    "task-3": {
-      "url": "https://chatgpt.com/g/g-p-6ad3b17e96f88191bf0fda969044d956-ai-workspace/c/6aee4012-cd44-83ec-b3b8-e18c3af6f1a6",
-      "rounds": 0,
-      "updatedAt": "2026-11-06T21:10:26.649Z"
-    },
-    "task-3-plan": {
-      "url": "https://chatgpt.com/c/6aedf8b5-c528-83ec-b709-4e56df4d4967",
-      "rounds": 0,
-      "updatedAt": "2026-11-06T17:48:04.686Z"
-    },
-    "task-3-review": {
-      "url": "https://chatgpt.com/g/g-p-6ad3b17e96f88191bf0fda969044d956-ai-workspace/c/6aee4012-cd44-83ec-b3b8-e18c3af6f1a6",
-      "rounds": 0,
-      "updatedAt": "2026-11-06T21:10:26.649Z"
-    },
     "task-4-plan": {
-      "url": "https://chatgpt.com/g/g-p-6ad3b17e96f88191bf0fda969044d956-ai-workspace/c/6aef3246-5064-83ec-99a8-624e9de3ca05",
+      "url": "https://chatgpt.com/c/6aef5668-3c08-83ec-bb8f-1450378002e3",
       "rounds": 2,
-      "updatedAt": "2026-11-07T16:00:32.946Z"
+      "updatedAt": "2026-11-07T16:55:40.219Z"
     },
     "task-4": {
-      "url": "https://chatgpt.com/g/g-p-6ad3b17e96f88191bf0fda969044d956-ai-workspace/c/6aef3246-5064-83ec-99a8-624e9de3ca05",
+      "url": "https://chatgpt.com/c/6aef5668-3c08-83ec-bb8f-1450378002e3",
       "rounds": 2,
-      "updatedAt": "2026-11-07T16:00:32.946Z"
+      "updatedAt": "2026-11-07T16:55:40.219Z"
     }
   }
 }

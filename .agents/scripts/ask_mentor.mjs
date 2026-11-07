@@ -1748,13 +1748,27 @@ async function connectCdpEndpoint(cdpUrl) {
   } catch (err) {
     const portMatch = String(cdpUrl).match(/:(\d+)/);
     const targetPort = portMatch ? portMatch[1] : '9222';
+
+    // Thử kết nối qua IPv6 loopback [::1]:<port> (nơi Chrome --user-data-dir riêng lắng nghe mà không hiện popup)
+    if (!String(cdpUrl).includes('[::1]')) {
+      try {
+        return await chromium.connectOverCDP(`http://[::1]:${targetPort}`);
+      } catch (_ipv6Err) {
+        // Tiếp tục fallback nếu [::1] không phản hồi
+      }
+    }
+
+    if (String(err.message || '').includes('ECONNREFUSED')) {
+      throw err;
+    }
+
     const homeDir = os.homedir();
     const localAppData =
       process.env.LOCALAPPDATA || path.join(homeDir, 'AppData', 'Local');
     const candidateFiles = [
-      path.join(localAppData, 'Google', 'Chrome', 'User Data', 'DevToolsActivePort'),
       path.join(homeDir, '.chrome-mentor-profile', 'DevToolsActivePort'),
       path.join(homeDir, '.chrome-gemini-profile', 'DevToolsActivePort'),
+      path.join(localAppData, 'Google', 'Chrome', 'User Data', 'DevToolsActivePort'),
     ];
 
     for (const filePath of candidateFiles) {

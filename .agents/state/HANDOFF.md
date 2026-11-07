@@ -15,40 +15,30 @@ Dự án **AI_WORK-FLOW** tự động hóa quy trình **Multi-Account Antigravi
 
 <!-- AUTO_CHECKPOINT_START -->
 ## Snapshot Cứu Hộ Quota (Auto-Checkpoint)
-- **Thời gian Checkpoint**: `2026-11-07T15:28:41.854Z`
+- **Thời gian Checkpoint**: `2026-11-07T16:59:43.956Z`
 - **Task đang mở (`taskId`)**: `task-4`
-- **Ghi chú (`--note`)**: Verify Level 1.1 Hardening + Multi-Profile Gemini CDP Bridge
-- **Bản sao lưu Patch**: `.agents/state/checkpoint.patch` (118139 bytes)
+- **Ghi chú (`--note`)**: Finalized CURRENT_PLAN.md v1.5 and Zero-Popup Multi-Profile Chrome CDP
+- **Bản sao lưu Patch**: `.agents/state/checkpoint.patch` (91146 bytes)
 - **Tóm tắt Test (`npm test`)**: **PASS** (`exitCode: 0`) — [PASS] FS-5 — Baseline Verification: Toàn vẹn End-to-End chu trình CRUD thực tế không rò rỉ file .tmp (Kiểm chứng đĩa từng bước) | [PASS] FS-SYMLINK-CLEANUP — Kiểm chứng an toàn khi workspace chứa Symbolic Link (Không đổi quyền hay xóa file ngoài) | [PASS] FS-SELF-CLEANUP — Tự kiểm chứng lỗi Cleanup của withIsolatedFaultWorkspace (Không nuốt lỗi) | [PASS] FS-NESTED-CLEANUP — Kiểm chứng dọn dẹp an toàn khi workspace chứa thư mục con lồng nhau và file chỉ đọc trên POSIX | === TỔNG KẾT FS FAULT: 7/8 PASS | 0/8 FAIL | 1/8 SKIP (Executed: 8) === | --- CÁC KỊCH BẢN BỎ QUA DO GIỚI HẠN HĐH (SKIP) ---
 - **Trạng thái Git (`git status --short`)**:
   ```text
-  M .agents/config.json
-   M .agents/scripts/ask_mentor.mjs
-   M .agents/scripts/verify_guard.mjs
+  M .agents/scripts/ask_mentor.mjs
    M .agents/state/CURRENT_PLAN.md
-   M .agents/state/HANDOFF.md
+   M .agents/state/GEMINI_FEEDBACK.md
    M .agents/state/MENTOR_FEEDBACK.md
-   M .agents/state/ROADMAP.md
    M .agents/state/SESSION_MAP.json
    M .agents/state/STATE_LOCK.json
-   M .gitignore
-   M package.json
    M start-system.bat
   ```
 - **Thống kê Diff (`git diff HEAD --stat`)**:
   ```text
-  .agents/config.json              |   3 +-
-   .agents/scripts/ask_mentor.mjs   | 727 ++++++++++++++++++++++++++-------------
-   .agents/scripts/verify_guard.mjs |   2 +-
-   .agents/state/CURRENT_PLAN.md    | 478 ++++++++++++-------------
-   .agents/state/HANDOFF.md         |  64 +---
-   .agents/state/MENTOR_FEEDBACK.md | 607 ++++++++++++++++++++++++++------
-   .agents/state/ROADMAP.md         |  17 +-
-   .agents/state/SESSION_MAP.json   |  16 +-
-   .agents/state/STATE_LOCK.json    |   8 +-
-   .gitignore                       |   3 +-
-   package.json                     |   3 +-
-   start-system.bat                 |  52 +--
-   12 files changed, 1298 insertions(+), 682 deletions(-)
+  .agents/scripts/ask_mentor.mjs   |  16 +-
+   .agents/state/CURRENT_PLAN.md    | 379 ++++++++++++++-----------------
+   .agents/state/GEMINI_FEEDBACK.md | 116 +++++-----
+   .agents/state/MENTOR_FEEDBACK.md | 472 ++++++++++++---------------------------
+   .agents/state/SESSION_MAP.json   |  32 +--
+   .agents/state/STATE_LOCK.json    |   2 +-
+   start-system.bat                 |  70 +++---
+   7 files changed, 438 insertions(+), 649 deletions(-)
   ```
 <!-- AUTO_CHECKPOINT_END -->

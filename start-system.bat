@@ -1,29 +1,41 @@
 @echo off
-chcp 65001 >nul
+setlocal
+set "CHROME=C:\Program Files\Google\Chrome\Application\chrome.exe"
+if not exist "%CHROME%" set "CHROME=%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"
 echo ========================================================
-echo   KHỞI ĐỘNG HỆ THỐNG MULTI-ACCOUNT ANTIGRAVITY + MENTOR
+echo   KHOI DONG CHROME MENTOR PROFILES (CHATGPT + GEMINI)
 echo ========================================================
 
-:: 1. Khởi động Hồ sơ Chrome 1 cho ChatGPT Mentor (Cổng 9222)
-echo [1/4] Đang mở Chrome Hồ sơ 1 - ChatGPT Mentor (Cổng 9222)...
-start "" "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222 --user-data-dir="%USERPROFILE%\.chrome-mentor-profile" https://chatgpt.com/
+rem 1. Chrome Profile 1 - ChatGPT Mentor (port 9222)
+netstat -ano | findstr ":9222 " | findstr "LISTENING" | findstr "\[::1\]" >nul 2>&1
+if %ERRORLEVEL% equ 0 (
+  echo [1/2] Chrome Profile 1 - ChatGPT (9222) da mo san.
+) else (
+  echo [1/2] Mo Chrome Profile 1 - ChatGPT Mentor (port 9222)...
+  start "" "%CHROME%" --remote-debugging-port=9222 --user-data-dir="%USERPROFILE%\.chrome-mentor-profile" https://chatgpt.com/
+)
 
-:: 2. Khởi động Hồ sơ Chrome 2 cho Gemini Mentor (Cổng 9223)
-echo [2/4] Đang mở Chrome Hồ sơ 2 - Gemini Mentor (Cổng 9223)...
-start "" "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9223 --user-data-dir="%USERPROFILE%\.chrome-gemini-profile" https://gemini.google.com/app
+rem 2. Chrome Profile 2 - Gemini Mentor (port 9223)
+netstat -ano | findstr ":9223 " | findstr "LISTENING" >nul 2>&1
+if %ERRORLEVEL% equ 0 (
+  echo [2/2] Chrome Profile 2 - Gemini (9223) da mo san.
+) else (
+  echo [2/2] Mo Chrome Profile 2 - Gemini Mentor (port 9223)...
+  start "" "%CHROME%" --remote-debugging-port=9223 --user-data-dir="%USERPROFILE%\.chrome-gemini-profile" https://gemini.google.com/app
+)
 
-:: 3. Mở cửa sổ Antigravity cho Tài khoản số 1 (Chuyên Research & Plan)
-echo [3/4] Đang mở Antigravity - Tài khoản số 1 (Account A)...
-start "" antigravity --user-data-dir="%USERPROFILE%\.ag-account-1" .
-
-:: 4. Mở cửa sổ Antigravity cho Tài khoản số 2 (Chuyên Implement & Test)
-echo [4/4] Đang mở Antigravity - Tài khoản số 2 (Account B)...
-start "" antigravity --user-data-dir="%USERPROFILE%\.ag-account-2" .
+rem Tuy chon: truyen --multi-account khi can mo them 2 cua so Antigravity phu
+if /I "%~1"=="--multi-account" (
+  echo [+] Mo them 2 cua so Antigravity (Account A va B)...
+  start "" /min cmd /c antigravity --user-data-dir="%USERPROFILE%\.ag-account-1" .
+  start "" /min cmd /c antigravity --user-data-dir="%USERPROFILE%\.ag-account-2" .
+)
 
 echo ========================================================
-echo ✅ Hoàn tất!
-echo    - Hồ sơ Chrome 1 (9222): Đăng nhập ChatGPT
-echo    - Hồ sơ Chrome 2 (9223): Đăng nhập Google Gemini
-echo    - Account A / B: Sẵn sàng điều phối RPIR đa luồng
+echo  HOAN TAT! Khong mo thua cua so Antigravity hay cmd.
+echo   - Chrome Profile 1 (9222): ChatGPT Mentor
+echo   - Chrome Profile 2 (9223): Google Gemini Mentor
+echo   - Khi het Quota, chay: start-system.bat --multi-account
 echo ========================================================
 pause
+endlocal
