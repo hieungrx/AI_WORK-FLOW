@@ -1,9 +1,38 @@
 {
-  "projectName": "",
-  "projectUrl": "https://chatgpt.com/",
+  "projectName": "AI-WorkFlow",
+  "projectUrl": "https://chatgpt.com/g/g-p-6aefa6fbc5a0819181753779c51e396d/project",
   "geminiThreadUrl": "",
   "currentTask": "task-1",
-  "threads": {},
+  "threads": {
+    "task-1-plan": {
+      "url": "https://chatgpt.com/g/g-p-6aefa6fbc5a0819181753779c51e396d-ai-workflow/c/6aefad4f-8a68-83ec-997f-7ceb9a8e5f83",
+      "rounds": 2,
+      "updatedAt": "2026-11-07T23:04:09.711Z"
+    },
+    "task-1": {
+      "url": "https://chatgpt.com/g/g-p-6aefa6fbc5a0819181753779c51e396d-ai-workflow/c/6aefaff0-3efc-83ec-b217-d63f96905612",
+      "rounds": 2,
+      "updatedAt": "2026-11-07T23:20:36.653Z"
+    },
+    "task-1-review": {
+      "url": "https://chatgpt.com/g/g-p-6aefa6fbc5a0819181753779c51e396d-ai-workflow/c/6aefaff0-3efc-83ec-b217-d63f96905612",
+      "rounds": 2,
+      "updatedAt": "2026-11-07T23:20:36.653Z"
+    }
+  },
   "geminiThreads": {},
-  "stageRounds": {}
+  "stageRounds": {
+    "task-1-plan": {
+      "updatedAt": "2026-11-07T23:03:02.579Z",
+      "chatgpt": 2,
+      "gemini": 0,
+      "resets": []
+    },
+    "task-1-review": {
+      "updatedAt": "2026-11-07T23:19:25.443Z",
+      "chatgpt": 2,
+      "gemini": 0,
+      "resets": []
+    }
+  }
 }

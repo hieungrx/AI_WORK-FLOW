@@ -1,0 +1,123 @@
+{
+  "task-1-plan": {
+    "chatgpt": [
+      {
+        "round": 1,
+        "status": "REJECTED",
+        "rawStatus": "REJECTED",
+        "p0": [
+          {
+            "id": "P0-01",
+            "title": "resolveTechDebt có nguy cơ đánh dấu hoàn thành sai nợ kỹ thuật — Các ID như P1-01 có thể xuất hiện ở nhiều Task. Việc tìm kiếm theo id hoặc chuỗi con trong summary mà không giới hạn phạm vi có thể vô tình chuyển nhiều mục từ [ ] sang [x], gây sai lệch dữ liệu vòng đời. Khắc phục: Ưu tiên định danh bằng fingerprint; khi tìm theo id, bắt buộc kết hợp taskId; khi tìm theo summary, chỉ cho phép cập nhật nếu xác định duy nhất một bản ghi. Nếu kết quả không duy nhất, trả lỗi và không sửa file. Bổ sung kiểm thử hai Task có cùng P1-01 và nhiều summary chứa cùng từ khóa.",
+            "isNew": false
+          },
+          {
+            "id": "P0-02",
+            "title": "Fingerprint cắt 80 ký tự có thể làm mất nợ kỹ thuật hợp lệ — Hai vấn đề khác nhau trong cùng Task nhưng có 80 ký tự đầu giống nhau sẽ tạo cùng fingerprint. appendTechDebt có thể xem vấn đề thứ hai là trùng lặp và bỏ qua vĩnh viễn. Khắc phục: Chỉ giới hạn 80 ký tự cho mục đích hiển thị, không dùng giới hạn này để xác định danh tính. Tạo fingerprint từ toàn bộ summary đã chuẩn hóa, chẳng hạn taskId|SHA-256(canonicalSummary). Bổ sung kiểm thử hai summary cùng 80 ký tự đầu nhưng có phần cuối khác nhau.",
+            "isNew": false
+          },
+          {
+            "id": "P0-03",
+            "title": "Thiếu hợp đồng bảo vệ cấu trúc Markdown khi ghi dữ liệu do Mentor sinh ra — Định dạng appendTechDebt hiện nội suy trực tiếp item.id, summary và detail vào dòng Markdown và comment <!-- TD:... -->. Nội dung chứa xuống dòng hoặc chuỗi điều khiển comment có thể phá cấu trúc bản ghi, làm sai kết quả parse hoặc tạo marker giả. Khắc phục: Quy định rõ bước validate và encode dữ liệu trước khi ghi; chuẩn hóa CR/LF thành nội dung an toàn trên một dòng, xử lý ký tự Markdown và comment delimiter. Kiểm thử round-trip append → parse với chuỗi chứa xuống dòng, --> và Markdown đặc biệt.",
+            "isNew": false
+          }
+        ],
+        "p1": [
+          {
+            "id": "P1-01",
+            "title": "Chưa đặc tả đầy đủ quy trình chuyển đổi khóa legacy — Cần định nghĩa cách đọc comment cũ, khôi phục taskId và summary, sau đó tính fingerprint mới để so sánh. Không bắt buộc sửa lại các dòng legacy đang tồn tại."
+          },
+          {
+            "id": "P1-02",
+            "title": "Giới hạn 5 mục có thể che khuất các vấn đề chưa được ghi nhận — Giữ DEFAULTMAXTECHDEBTPERROUND = 5 là hợp lý để giảm nhiễu, nhưng nên đảm bảo droppedCount phản ánh cả số mục bị loại vì trùng, nhiễu và vượt giới hạn; tốt hơn nên tách thống kê theo nguyên nhân."
+          },
+          {
+            "id": "P1-03",
+            "title": "Chưa xác định cơ chế ghi file an toàn khi cập nhật vòng đời — Nên sử dụng ghi file tạm rồi thay thế file đích để giảm nguy cơ mất nội dung khi thao tác ghi bị gián đoạn. Bổ sung kiểm thử lỗi ghi để bảo đảm bản gốc không bị thay đổi ngoài ý muốn."
+          }
+        ],
+        "p2": [
+          {
+            "id": "P2-01",
+            "title": "Bộ kiểm thử chuẩn hóa Unicode chưa được mô tả cụ thể — Bổ sung các trường hợp NFC/NFD, dấu câu tiếng Việt, ký tự Markdown và khoảng trắng liên tiếp."
+          }
+        ],
+        "warnings": [],
+        "at": "2026-11-07T23:00:58.622Z"
+      },
+      {
+        "round": 2,
+        "status": "APPROVED",
+        "rawStatus": "APPROVED",
+        "p0": [],
+        "p1": [],
+        "p2": [],
+        "warnings": [],
+        "at": "2026-11-07T23:04:09.715Z"
+      }
+    ]
+  },
+  "task-1-review": {
+    "chatgpt": [
+      {
+        "round": 1,
+        "status": "REJECTED",
+        "rawStatus": "REJECTED",
+        "p0": [
+          {
+            "id": "P0-01",
+            "title": "appendTechDebt có thể bỏ sót nợ kỹ thuật mới khi áp dụng giới hạn trước khử trùng lặp — Tại src/techdebt.mjs:347–392, hàm gọi filterAndRankTechDebt() với maxItems trước khi loại các fingerprint đã tồn tại trong TECHDEBT.md. Nếu 5 mục đầu đã tồn tại và mục thứ 6 là vấn đề mới, mục thứ 6 bị loại trước khi xét trùng lặp. Đã tái hiện: lần đầu ghi 5 mục thành công; lần thứ hai gửi lại 5 mục cũ cùng 1 mục mới, hàm trả về 0 và mục mới không được ghi. Khắc phục: lọc và chuẩn hóa toàn bộ đầu vào, khử trùng lặp trong lô, loại fingerprint đã tồn tại, sau đó mới xếp hạng và áp dụng maxItems. Bổ sung regression test xác nhận mục mới không bị bỏ sót.",
+            "isNew": false
+          },
+          {
+            "id": "P0-02",
+            "title": "resolveTechDebt có thể khiến bản ghi biến mất khỏi parser và thống kê khi ghi chú chứa dấu ngoặc đóng — Tại src/techdebt.mjs:401–450 và 543–605, resolutionNote được ghi vào Markdown nhưng parseTechDebtFile() chỉ chấp nhận đoạn ghi chú khớp Đã xử lý:[^)]+. Một ghi chú hợp lệ như Fixed parse() handling khiến dòng đã xử lý không còn khớp regex. Khắc phục: sử dụng parser hỗ trợ đầy đủ ký tự trong ghi chú hoặc mã hóa nội dung ghi chú theo định dạng có thể giải mã ổn định. Bổ sung regression test kiểm tra round-trip và thống kê với (), Markdown và ký tự đặc biệt.",
+            "isNew": false
+          }
+        ],
+        "p1": [
+          {
+            "id": "P1-01",
+            "title": "Chưa xác minh tích hợp thực tế với reviewpolicy.mjs — ROADMAP yêu cầu tích hợp module vào quy trình review, nhưng bằng chứng được cung cấp chỉ bao gồm diff trong src/ và tests/. Cần kiểm tra thay đổi tại reviewpolicy.mjs và kiểm thử luồng tích hợp. Chưa đủ bằng chứng để kết luận tích hợp thất bại."
+          },
+          {
+            "id": "P1-02",
+            "title": "Chưa có kiểm thử cập nhật đồng thời — appendTechDebt() sử dụng chu trình đọc–kiểm tra–ghi, không có cơ chế khóa giữa các tiến trình. Hai Worker cùng cập nhật một file có thể ghi đè thay đổi của nhau. Cần kiểm thử nhiều tiến trình và bổ sung serialization hoặc locking nếu hệ thống cho phép ghi đồng thời."
+          }
+        ],
+        "p2": [
+          {
+            "id": "P2-01",
+            "title": "Thống kê test runner chưa phản ánh trực tiếp 8 test case — TAP hiển thị tests 1 vì 8 trường hợp được chạy bằng test harness tự xây dựng trong một file. Nên chuyển sang node:test để báo cáo từng test case, hỗ trợ CI và truy vết lỗi tốt hơn."
+          }
+        ],
+        "warnings": [],
+        "at": "2026-11-07T23:11:54.934Z"
+      },
+      {
+        "round": 2,
+        "status": "APPROVED",
+        "rawStatus": "APPROVED",
+        "p0": [],
+        "p1": [
+          {
+            "id": "P1-01",
+            "title": "Xác minh tích hợp thực tế với reviewpolicy.mjs."
+          },
+          {
+            "id": "P1-02",
+            "title": "Kiểm thử và kiểm soát cập nhật file đồng thời giữa các Worker."
+          }
+        ],
+        "p2": [
+          {
+            "id": "P2-01",
+            "title": "Cải thiện báo cáo test runner — đã chuyển sang node:test trong bản sửa hiện tại."
+          }
+        ],
+        "warnings": [],
+        "at": "2026-11-07T23:20:36.665Z"
+      }
+    ]
+  }
+}

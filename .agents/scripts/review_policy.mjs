@@ -9,6 +9,23 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import childProcess from 'node:child_process';
+import {
+  appendTechDebt,
+  filterAndRankTechDebt,
+  resolveTechDebt,
+  summarizeTechDebt,
+  parseTechDebtFile,
+  buildTechDebtFingerprint,
+} from '../../src/tech_debt.mjs';
+
+export {
+  appendTechDebt,
+  filterAndRankTechDebt,
+  resolveTechDebt,
+  summarizeTechDebt,
+  parseTechDebtFile,
+  buildTechDebtFingerprint,
+};
 
 export const PROVIDERS = ['chatgpt', 'gemini'];
 export const ESCALATION_EXIT_CODE = 3;
@@ -262,24 +279,7 @@ export const WARNING_TEXT = Object.freeze({
     'Mentor nêu P0 mới không có tiền tố NEW- (vi phạm quy tắc hội tụ) -> giữ trạng thái, người cần xem lại.',
 });
 
-/** Nối các mục P1/P2 vào TECH_DEBT.md (loại trùng theo task/giai đoạn/provider/ID/tiêu đề). */
-export function appendTechDebt(filePath, items, meta, now = new Date()) {
-  const existing = fs.existsSync(filePath) ? normalizeNewlines(fs.readFileSync(filePath, 'utf8')) : '';
-  const header = existing || '# TECH_DEBT — Góp ý không chặn (P1/P2) từ Mentor\n\n';
-  const lines = [];
-  for (const item of items || []) {
-    const key = `${meta.threadKey}|${meta.provider}|${item.id}|${item.title}`.replace(/-->/g, '');
-    if (header.includes(`<!-- TD:${key} -->`)) continue;
-    const tags = [meta.threadKey, meta.provider, `vòng ${meta.round}`];
-    if (item.late) tags.push('late');
-    lines.push(`- [ ] **${item.id}** ${item.title || '(không có tiêu đề)'} _(${tags.join(' · ')} · ${now.toISOString().slice(0, 10)})_ <!-- TD:${key} -->`);
-  }
-  if (lines.length === 0) return 0;
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  const body = header.endsWith('\n') ? header : `${header}\n`;
-  fs.writeFileSync(filePath, `${body}${lines.join('\n')}\n`, 'utf8');
-  return lines.length;
-}
+// Đã chuyển cài đặt appendTechDebt sang src/tech_debt.mjs và re-export ở đầu file.
 
 // ---------------------------------------------------------------------------
 // 3. Ledger & quy tắc hội tụ

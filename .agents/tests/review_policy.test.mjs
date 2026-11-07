@@ -333,15 +333,15 @@ test('RP-9: ask_mentor.mjs --dry-run chạy quyết định mà không sửa b�
       '--mode',
       'plan',
       '--task',
-      'task-1',
+      'task-rp9-dryrun',
       '--provider',
       'both',
     ],
     { cwd: REPO_ROOT, encoding: 'utf8', windowsHide: true }
   );
   assert.equal(res.status, 0, `stderr: ${res.stderr}`);
-  assert.ok(res.stdout.includes('provider=gemini | stage=task-1-plan | round='));
-  assert.ok(res.stdout.includes('provider=chatgpt | stage=task-1-plan | round='));
+  assert.ok(res.stdout.includes('provider=gemini | stage=task-rp9-dryrun-plan | round='));
+  assert.ok(res.stdout.includes('provider=chatgpt | stage=task-rp9-dryrun-plan | round='));
 
   const snapshotAfter = Object.fromEntries(
     fs

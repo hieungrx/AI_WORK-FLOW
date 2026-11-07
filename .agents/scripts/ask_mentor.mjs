@@ -1765,6 +1765,9 @@ async function prepareTaskThread(
   const desiredProjectName =
     projectName || DEFAULT_PROJECT_NAME || sessionMap?.projectName || 'AI-WORKSPACE';
 
+  const initialUrl = page.url();
+  const initialPrevMatch = initialUrl.match(CONVERSATION_URL_REGEX);
+
   // 0. Đảm bảo đang ở chế độ Chat tiêu chuẩn (không kẹt ở Codex / Work)
   await ensureChatGptMode(page);
 
@@ -1791,7 +1794,7 @@ async function prepareTaskThread(
   );
 
   const currentUrl = page.url();
-  const prevMatch = currentUrl.match(CONVERSATION_URL_REGEX);
+  const prevMatch = currentUrl.match(CONVERSATION_URL_REGEX) || initialPrevMatch;
   const previousConversationId = prevMatch ? prevMatch[1] : '';
 
   // 2. Tiếp tục luồng chat hiện có nếu không phải tạo thread mới
@@ -1963,7 +1966,10 @@ async function tryInvokeGptMention(page, promptTextarea, selectedRoles) {
       }
     });
 
+    // ChatGPT chỉ hỗ trợ gắn tối đa 1 @Plugin pill trên mỗi lượt gửi (gắn >= 2 pill sẽ chặn gửi tin nhắn).
+    // Các vai trò kết hợp vẫn được truyền đầy đủ trong khối Role Header của prompt.
     for (const role of selectedRoles) {
+      if (attachedCount >= 1) break;
       const pluginName = (role && role.name ? String(role.name) : '').trim();
       if (!pluginName) continue;
 
