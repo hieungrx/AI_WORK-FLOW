@@ -21,5 +21,7 @@
   },
   "geminiGemUrl": "",
   "dualMentorPolicy": "chatgpt-gate",
-  "useGptMention": true
+  "useGptMention": true,
+  "chatgptComposerMode": "work",
+  "chatgptModel": ""
 }

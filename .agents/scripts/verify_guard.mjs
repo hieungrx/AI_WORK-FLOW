@@ -18,8 +18,14 @@ const sha256 = (text) => crypto.createHash('sha256').update(text, 'utf8').digest
 export function loadWorkflowConfig(root = REPO_ROOT) {
   const defaultProjectName = path.basename(root) || 'AI-WORKSPACE';
   const defaults = {
-    projectName: defaultProjectName, cdpUrl: 'http://127.0.0.1:9222', geminiCdpUrl: 'http://127.0.0.1:9223',
-    sourceDirs: ['src', 'tests'], testCommand: 'npm test', maxReviewRounds: 2,
+    projectName: defaultProjectName,
+    cdpUrl: 'http://127.0.0.1:9222',
+    geminiCdpUrl: 'http://127.0.0.1:9223',
+    sourceDirs: ['src', 'tests'],
+    testCommand: 'npm test',
+    maxReviewRounds: 2,
+    chatgptComposerMode: 'work',
+    chatgptModel: '',
   };
   try {
     const p = path.join(root, '.agents', 'config.json');

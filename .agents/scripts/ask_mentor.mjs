@@ -74,7 +74,7 @@ const DEFAULT_MODE = 'plan';
 const DEFAULT_PROVIDER = 'chatgpt';
 const VALID_MODES = new Set(['plan', 'review-code', 'rescue']);
 const VALID_PROVIDERS = new Set(['chatgpt', 'gemini', 'both']);
-const VALID_EFFORTS = new Set(['high', 'standard']);
+const VALID_EFFORTS = new Set(['high', 'standard', 'instant']);
 const MAX_DIFF_CHARS = 300_000;
 const MAX_SKELETON_LINES = 150;
 // Phạm vi review code: đọc từ .agents/config.json (mặc định ['src', 'tests']), tuyệt đối không gửi .agents/
@@ -164,9 +164,23 @@ function normalizeEffort(rawEffort) {
     val === 'chuẩn' ||
     val === 'chuan' ||
     val === 'trung bình' ||
-    val === 'vừa'
+    val === 'vừa' ||
+    val === 'vua'
   ) {
     return 'standard';
+  }
+  if (
+    val === 'instant' ||
+    val === 'low' ||
+    val === 'tức thì' ||
+    val === 'tuc thi' ||
+    val === 'nhẹ nhàng' ||
+    val === 'nhe nhang' ||
+    val === 'thấp' ||
+    val === 'thap' ||
+    val === 'nhanh'
+  ) {
+    return 'instant';
   }
   return val;
 }
@@ -196,6 +210,7 @@ export function parseArgs(argv) {
   let model = '';
   let projectName = '';
   let cdpUrl = process.env.CDP_URL || DEFAULT_CDP_URL;
+  let composerArg = '';
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -252,6 +267,22 @@ export function parseArgs(argv) {
       i += 1;
     } else if (arg.startsWith('--cdp=')) {
       cdpUrl = arg.slice('--cdp='.length).trim();
+    } else if (arg === '--composer' && i + 1 < argv.length) {
+      composerArg = normalizeComposerMode(argv[i + 1]);
+      if (!composerArg) {
+        throw new Error(
+          `Chế độ khung chat --composer không hợp lệ: "${argv[i + 1]}". Chỉ hỗ trợ: chat, work.`
+        );
+      }
+      i += 1;
+    } else if (arg.startsWith('--composer=')) {
+      const rawComposer = arg.slice('--composer='.length);
+      composerArg = normalizeComposerMode(rawComposer);
+      if (!composerArg) {
+        throw new Error(
+          `Chế độ khung chat --composer không hợp lệ: "${rawComposer}". Chỉ hỗ trợ: chat, work.`
+        );
+      }
     }
   }
 
@@ -269,7 +300,7 @@ export function parseArgs(argv) {
 
   if (effortArg && !VALID_EFFORTS.has(effortArg)) {
     throw new Error(
-      `Mức suy luận --effort không hợp lệ: "${effortArg}". Chỉ hỗ trợ: high, standard.`
+      `Mức suy luận --effort không hợp lệ: "${effortArg}". Chỉ hỗ trợ: high, standard, instant.`
     );
   }
 
@@ -287,7 +318,48 @@ export function parseArgs(argv) {
     model,
     projectName,
     cdpUrl,
+    composerArg,
   };
+}
+
+/**
+ * Chuẩn hóa chế độ khung soạn thảo trong ChatGPT Project ("Chế độ trình soạn thảo"):
+ * - `chat` ("Trò chuyện"): KHÔNG có bộ chọn mô hình, chỉ có 3 mức suy luận `Tức thì` / `Vừa` / `Cao`,
+ *   không có nút `Plugin` (không gắn được `@Plugin` chuyên gia).
+ * - `work` ("Công việc"): hiện bộ chọn mô hình (VD `GPT-6.1 Sol`) ngay trong khung chat,
+ *   thanh suy luận 5 nấc (`Nhẹ nhàng` -> `Max`) và có nút `Plugin` để gắn `@Plugin`.
+ *
+ * @param {unknown} raw
+ * @returns {'' | 'chat' | 'work'}
+ */
+export function normalizeComposerMode(raw) {
+  if (typeof raw !== 'string') {
+    return '';
+  }
+  const val = raw.trim().toLowerCase();
+  if (['chat', 'trò chuyện', 'tro chuyen', 'conversation'].includes(val)) {
+    return 'chat';
+  }
+  if (['work', 'công việc', 'cong viec', 'task'].includes(val)) {
+    return 'work';
+  }
+  return '';
+}
+
+/**
+ * Xác định chế độ khung chat hiệu lực: `--composer` > `.agents/config.json -> chatgptComposerMode` > `work`.
+ * Mặc định `work` vì đây là chế độ duy nhất hỗ trợ `@Plugin` chuyên gia và chọn mô hình.
+ *
+ * @param {string} [composerArg='']
+ * @param {{ chatgptComposerMode?: string }} [config={}]
+ * @returns {'chat' | 'work'}
+ */
+export function resolveComposerMode(composerArg = '', config = {}) {
+  return (
+    normalizeComposerMode(composerArg) ||
+    normalizeComposerMode(config?.chatgptComposerMode) ||
+    'work'
+  );
 }
 
 /**
@@ -1232,6 +1304,113 @@ export async function ensureChatGptMode(page) {
 }
 
 /**
+ * Chuyển nút gạt "Chế độ trình soạn thảo" trên trang Project ChatGPT sang `Trò chuyện` (chat) hoặc `Công việc` (work).
+ * Nút gạt chỉ xuất hiện trên trang Project (`/g/g-p-.../project`) trước khi mở luồng mới, và được ChatGPT ghi nhớ theo Project.
+ * Bọc an toàn: nếu giao diện không có nút gạt thì bỏ qua.
+ *
+ * @param {import('playwright-core').Page} page
+ * @param {'chat' | 'work'} composerMode
+ * @returns {Promise<boolean>} true nếu đang ở đúng chế độ yêu cầu sau khi xử lý
+ */
+export async function ensureProjectComposerMode(page, composerMode) {
+  const label =
+    composerMode === 'chat' ? /^\s*(Trò chuyện|Chat)\s*$/i : /^\s*(Công việc|Work)\s*$/i;
+  try {
+    const group = page
+      .locator(
+        '[role="group"][aria-label*="trình soạn thảo" i], [role="group"][aria-label*="composer" i]'
+      )
+      .first();
+    if (!(await group.isVisible().catch(() => false))) {
+      return false;
+    }
+    const target = group.locator('button[aria-pressed]').filter({ hasText: label }).first();
+    if (!(await target.isVisible().catch(() => false))) {
+      return false;
+    }
+    if ((await target.getAttribute('aria-pressed').catch(() => '')) === 'true') {
+      return true;
+    }
+    await target.click({ timeout: 4_000 });
+    await sleep(900);
+    const ok = (await target.getAttribute('aria-pressed').catch(() => '')) === 'true';
+    console.log(
+      ok
+        ? `[COMPOSER MODE]: Đã chuyển khung chat Project sang "${composerMode === 'chat' ? 'Trò chuyện' : 'Công việc'}".`
+        : `[COMPOSER MODE]: Không xác nhận được việc chuyển sang "${composerMode}" — giữ nguyên giao diện hiện tại.`
+    );
+    return ok;
+  } catch (_err) {
+    return false;
+  }
+}
+
+/**
+ * Chọn mô hình ChatGPT (VD `GPT-6.1 Sol`) trong bộ chọn ngay khung chat — chỉ có ở chế độ `Công việc`.
+ * Ở chế độ `Trò chuyện` không có bộ chọn mô hình nên hàm tự bỏ qua.
+ *
+ * @param {import('playwright-core').Page} page
+ * @param {string} modelName
+ * @returns {Promise<boolean>}
+ */
+export async function selectChatGptModel(page, modelName) {
+  const wanted = typeof modelName === 'string' ? modelName.trim() : '';
+  if (!wanted) {
+    return false;
+  }
+  const escaped = wanted.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  try {
+    const modelBtn = page
+      .locator('button[aria-label*="Chọn mô hình" i]:visible, button[aria-label*="Select model" i]:visible, button[aria-label*="model" i]:visible')
+      .first();
+    if (!(await modelBtn.isVisible().catch(() => false))) {
+      return false;
+    }
+    const currentText = (await modelBtn.innerText().catch(() => '')).split(/\r?\n/)[0].trim();
+    if (new RegExp(`^${escaped}$`, 'i').test(currentText)) {
+      return true;
+    }
+    // Chế độ "Trò chuyện": nút chỉ hiển thị "Mức nỗ lực suy luận" -> không có bộ chọn mô hình
+    if (!/GPT|o\d|model/i.test(currentText)) {
+      console.log(
+        `[MODEL]: Khung chat hiện tại không có bộ chọn mô hình (chế độ "Trò chuyện") — bỏ qua chọn "${wanted}".`
+      );
+      return false;
+    }
+
+    await modelBtn.click({ timeout: 4_000 });
+    await sleep(400);
+    // Menu 2 tầng: bấm mục "Chọn mô hình" để trượt sang danh sách mô hình
+    const openMenu = page.locator('[role="menu"][data-state="open"]').first();
+    const chooseItem = openMenu
+      .locator('[role="menuitem"][aria-label*="Chọn mô hình" i], [role="menuitem"][aria-label*="model" i]')
+      .first();
+    if (await chooseItem.isVisible().catch(() => false)) {
+      await chooseItem.click({ timeout: 4_000 });
+      await sleep(400);
+    }
+    const option = page
+      .locator('[role="menuitemradio"]')
+      .filter({ hasText: new RegExp(`^\\s*${escaped}\\s*$`, 'i') })
+      .first();
+    if (!(await option.isVisible().catch(() => false))) {
+      await page.keyboard.press('Escape').catch(() => {});
+      await page.keyboard.press('Escape').catch(() => {});
+      console.warn(`[MODEL]: Không tìm thấy mô hình "${wanted}" trong danh sách — giữ nguyên "${currentText}".`);
+      return false;
+    }
+    await option.click({ timeout: 4_000 });
+    await sleep(600);
+    await page.keyboard.press('Escape').catch(() => {});
+    console.log(`[MODEL]: Đã chọn mô hình "${wanted}".`);
+    return true;
+  } catch (_err) {
+    await page.keyboard.press('Escape').catch(() => {});
+    return false;
+  }
+}
+
+/**
  * Đảm bảo thanh bên (sidebar) của ChatGPT đang mở và mục "Dự án" / "Projects" đang xổ ra.
  *
  * @param {import('playwright-core').Page} page
@@ -1553,12 +1732,12 @@ const resolveProjectUrl = ensureProjectUrl;
  * và gõ thẳng vào ô composer ở giữa màn hình của Project.
  *
  * @param {import('playwright-core').Page} page
- * @param {{ existingThreadUrl: string, isNewThread: boolean, projectUrl: string, model: string, projectName?: string, sessionMap?: any }} options
+ * @param {{ existingThreadUrl: string, isNewThread: boolean, projectUrl: string, model: string, projectName?: string, sessionMap?: any, composerMode?: 'chat' | 'work' }} options
  * @returns {Promise<{ previousConversationId: string, effectiveNewThread: boolean }>}
  */
 async function prepareTaskThread(
   page,
-  { existingThreadUrl, isNewThread, projectUrl, model, projectName, sessionMap }
+  { existingThreadUrl, isNewThread, projectUrl, model, projectName, sessionMap, composerMode }
 ) {
   const desiredProjectName =
     projectName || DEFAULT_PROJECT_NAME || sessionMap?.projectName || 'AI-WORKSPACE';
@@ -1628,6 +1807,11 @@ async function prepareTaskThread(
       await page.goto(targetProjectUrl, { waitUntil: 'domcontentloaded' });
       await sleep(2500);
     }
+  }
+
+  // 4. Chọn chế độ khung chat của Project ("Trò chuyện" / "Công việc") trước khi gửi tin đầu tiên
+  if (composerMode) {
+    await ensureProjectComposerMode(page, composerMode);
   }
 
   return { previousConversationId, effectiveNewThread: true };
@@ -1917,11 +2101,13 @@ export async function setThinkingEffort(page, mode = 'plan', explicitEffort = ''
   const targetEffort =
     normExplicit || (mode === 'review-code' ? 'standard' : 'high');
   const targetLabelRegex =
-    targetEffort === 'standard'
-      ? /(?:^|\s|\n)(Chuẩn|Trung bình|Vừa|Standard|Medium)(?:$|\s|\n)/i
-      : /(?:^|\s|\n)(Cao|High)(?:$|\s|\n)/i;
+    targetEffort === 'instant'
+      ? /(?:^|\s|\n)(Tức thì|Nhẹ nhàng|Nhanh|Thấp|Instant|Low)(?:$|\s|\n)/i
+      : targetEffort === 'standard'
+        ? /(?:^|\s|\n)(Chuẩn|Trung bình|Vừa|Standard|Medium)(?:$|\s|\n)/i
+        : /(?:^|\s|\n)(Cao|High)(?:$|\s|\n)/i;
   const anyEffortButtonRegex =
-    /(Cao|Chuẩn|Trung bình|Vừa|Thấp|Nhẹ nhàng|Nhanh|Chuyên sâu|Không suy luận|Max|Ultra|High|Standard|Medium|Low|GPT-)/i;
+    /(Cao|Chuẩn|Trung bình|Vừa|Thấp|Tức thì|Nhẹ nhàng|Nhanh|Chuyên sâu|Không suy luận|Max|Ultra|High|Standard|Medium|Low|Instant|GPT-)/i;
 
   let menuOpened = false;
   try {
@@ -1949,7 +2135,10 @@ export async function setThinkingEffort(page, mode = 'plan', explicitEffort = ''
     menuOpened = true;
     await sleep(350);
 
-    // 1. Giao diện GPT-6.1 Sol mới: thanh trượt [role="slider"] (VD trên Sol: 0=Nhẹ nhàng, 1=Vừa, 2=Cao, 3=Chuyên sâu, 4=Max)
+    // 1. Thanh trượt [role="slider"] — nhãn khác nhau theo chế độ khung chat Project:
+    //    - "Công việc" (VD GPT-6.1 Sol): 0=Nhẹ nhàng, 1=Vừa, 2=Cao, 3=Chuyên sâu, 4=Max
+    //    - "Trò chuyện" (không chọn mô hình): 0=Tức thì, 1=Vừa, 2=Cao
+    //    => Dò theo nhãn thực tế thay vì cố định chỉ số nấc.
     const slider = page
       .locator(
         '[role="menu"][data-state="open"] [role="slider"], [role="menuitem"][aria-label*="Năng lượng" i] [role="slider"], [role="menuitem"][aria-label*="Effort" i] [role="slider"], [role="menuitem"][aria-label*="Thinking" i] [role="slider"]'
@@ -1990,9 +2179,11 @@ export async function setThinkingEffort(page, mode = 'plan', explicitEffort = ''
         // Fallback theo nấc chuẩn nếu ngôn ngữ giao diện khác Tiếng Việt / Tiếng Anh
         if (!matchedByLabel) {
           const fallbackVal =
-            targetEffort === 'standard'
-              ? Math.min(minVal + 1, maxVal)
-              : Math.min(minVal + 2, maxVal);
+            targetEffort === 'instant'
+              ? minVal
+              : targetEffort === 'standard'
+                ? Math.min(minVal + 1, maxVal)
+                : Math.min(minVal + 2, maxVal);
           const afterScanVal = Number(
             await slider.getAttribute('aria-valuenow').catch(() => String(maxVal))
           );
@@ -3175,7 +3366,10 @@ async function main() {
     model,
     projectName,
     cdpUrl,
+    composerArg,
   } = parseArgs(process.argv.slice(2));
+  const composerMode = resolveComposerMode(composerArg, WORKFLOW_CONFIG);
+  const chatgptModel = (model || WORKFLOW_CONFIG.chatgptModel || '').trim();
   const selectedRoles = resolveSpecialistRoles(roleArg, mode);
   const dualPolicy = resolveDualMentorPolicy(WORKFLOW_CONFIG.dualMentorPolicy);
   // Khi --provider both: chạy Gemini trước để đưa P0 của Gemini vào prompt ChatGPT (Second Opinion)
@@ -3195,6 +3389,11 @@ async function main() {
         throw new Error(`Chưa xác nhận được URL Project hợp lệ cho "${targetProjectName}" (nhận được: ${resolvedUrl}).`);
       }
       console.log(`[PROJECT READY]: "${targetProjectName}" -> ${resolvedUrl}`);
+      if (!conn.page.url().includes('/project')) {
+        await conn.page.goto(resolvedUrl, { waitUntil: 'domcontentloaded' });
+        await sleep(2500);
+      }
+      await ensureProjectComposerMode(conn.page, composerMode);
       return;
     } finally {
       if (conn?.browser) {
@@ -3555,6 +3754,7 @@ async function main() {
           model,
           projectName,
           sessionMap,
+          composerMode,
         });
 
       const secondOpinionBlock =
@@ -3584,6 +3784,9 @@ async function main() {
       const promptTextarea = page.locator(PROMPT_SELECTOR).first();
       await promptTextarea.waitFor({ state: 'visible', timeout: 60_000 });
 
+      if (composerMode === 'work' && chatgptModel) {
+        await selectChatGptModel(page, chatgptModel);
+      }
       await setThinkingEffort(page, mode, effortArg);
 
       const stopLocator = page.locator(STOP_BUTTON_SELECTOR);
@@ -3611,7 +3814,13 @@ async function main() {
         }
       }
 
-      await tryInvokeGptMention(page, promptTextarea, selectedRoles);
+      if (composerMode === 'chat') {
+        console.log(
+          '[ROLE MENTION]: Chế độ "Trò chuyện" không hỗ trợ @Plugin — dùng khối Role Header trong prompt thay thế.'
+        );
+      } else {
+        await tryInvokeGptMention(page, promptTextarea, selectedRoles);
+      }
       await fillPromptFast(promptTextarea, reviewPrompt);
       await page.keyboard.press('Space').catch(() => {});
 

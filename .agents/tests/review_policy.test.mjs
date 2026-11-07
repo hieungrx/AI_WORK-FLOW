@@ -43,6 +43,8 @@ import {
   normalizeSessionMap,
   buildMentorPrompt,
   normalizeChatGptProjectUrl,
+  normalizeComposerMode,
+  resolveComposerMode,
 } from '../scripts/ask_mentor.mjs';
 import { loadWorkflowConfig } from '../scripts/verify_guard.mjs';
 
@@ -395,6 +397,28 @@ test('RP-11: Tự động lấy tên thư mục dự án Antigravity khi project
     'https://chatgpt.com/g/g-p-6ad3b17e96f88191bf0fda969044d956/project'
   );
   assert.equal(normalizeChatGptProjectUrl('https://chatgpt.com/'), '');
+});
+
+test('RP-12: Chế độ khung chat Project (Trò chuyện / Công việc) qua --composer và config.chatgptComposerMode', () => {
+  assert.equal(normalizeComposerMode('chat'), 'chat');
+  assert.equal(normalizeComposerMode('Trò chuyện'), 'chat');
+  assert.equal(normalizeComposerMode('WORK'), 'work');
+  assert.equal(normalizeComposerMode('Công việc'), 'work');
+  assert.equal(normalizeComposerMode('codex'), '');
+
+  // Ưu tiên: --composer > config > mặc định "work"
+  assert.equal(resolveComposerMode('', {}), 'work');
+  assert.equal(resolveComposerMode('', { chatgptComposerMode: 'chat' }), 'chat');
+  assert.equal(resolveComposerMode('work', { chatgptComposerMode: 'chat' }), 'work');
+  assert.equal(resolveComposerMode('', { chatgptComposerMode: 'bogus' }), 'work');
+
+  assert.equal(parseArgs(['--composer', 'chat']).composerArg, 'chat');
+  assert.equal(parseArgs(['--composer=công việc']).composerArg, 'work');
+  assert.equal(parseArgs(['--effort', 'tức thì']).effortArg, 'instant');
+  assert.equal(parseArgs(['--effort=vừa']).effortArg, 'standard');
+  assert.equal(parseArgs(['--effort', 'cao']).effortArg, 'high');
+  assert.equal(parseArgs([]).composerArg, '');
+  assert.throws(() => parseArgs(['--composer', 'codex']), /--composer không hợp lệ/);
 });
 
 console.log(`\n=== TỔNG KẾT REVIEW POLICY v2: ${passed}/${passed} PASS ===`);
