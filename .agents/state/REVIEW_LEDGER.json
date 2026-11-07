@@ -119,5 +119,111 @@
         "at": "2026-11-07T23:20:36.665Z"
       }
     ]
+  },
+  "task-2-plan": {
+    "chatgpt": [
+      {
+        "round": 1,
+        "status": "REJECTED",
+        "rawStatus": "REJECTED",
+        "p0": [
+          {
+            "id": "P0-01",
+            "title": "Race Condition trong cơ chế thu hồi stale lock có thể gây Lost Update — Chiến lược renameSync(lockPath, stalePath) chưa bảo đảm tệp được đổi tên vẫn là khóa cũ mà tiến trình đã kiểm tra. Khi hai tiến trình B và C cùng phát hiện khóa của A đã hết hạn, B có thể đổi tên khóa A rồi tạo khóa mới; C tiếp tục renameSync(lockPath, ...) và vô tình di chuyển khóa mới của B. Khi đó B và C đều có thể thực thi vùng găng, khiến mục tiêu chống Lost Update của Task 2 thất bại. Bắt buộc: thiết kế lại giao thức thu hồi để không thể xóa/di chuyển khóa mới trong quá trình cạnh tranh. Việc kiểm tra token trước renameSync hoặc unlinkSync không đủ vì vẫn tồn tại khoảng hở TOCTOU (Time-of-Check to Time-of-Use).",
+            "isNew": false
+          },
+          {
+            "id": "P0-02",
+            "title": "Khóa của tiến trình còn sống có thể bị thu hồi sau 10 giây — staleMs: 10000 hiện được sử dụng như thời hạn hết hiệu lực khóa nhưng không có heartbeat, cơ chế xác nhận tiến trình đã chết hoặc giới hạn thời gian thực thi fn(). Một tiến trình đang thực hiện tác vụ lâu, bị OS tạm dừng hoặc gặp I/O chậm vẫn có thể bị tiến trình khác thu hồi khóa. Điều này phá vỡ tính độc quyền của critical section và có thể làm mất dữ liệu. Bắt buộc: không được suy luận tiến trình đã chết chỉ dựa vào tuổi khóa; cần cơ chế kiểm tra an toàn hoặc chuyển sang chính sách không tự động thu hồi khi chưa chứng minh được khóa đã bị bỏ rơi.",
+            "isNew": false
+          },
+          {
+            "id": "P0-03",
+            "title": "Ownership-Verified Release vẫn có thể xóa khóa của tiến trình khác — Trong finally, thao tác đọc và xác minh parsed.token === token diễn ra trước renameSync hoặc unlinkSync. Nếu tiến trình A xác minh thành công, sau đó bị tạm dừng, tiến trình B có thể thu hồi khóa A và tạo khóa mới. Khi A tiếp tục giải phóng khóa, nó có thể xóa nhầm khóa của B. Bắt buộc: giao thức release phải có cơ chế bảo đảm quyền sở hữu tại thời điểm thay đổi trạng thái khóa, không chỉ kiểm tra token trước đó. Nếu không thể bảo đảm bằng các primitive hiện tại, phải loại bỏ đường thu hồi gây ra cuộc đua này.",
+            "isNew": false
+          }
+        ],
+        "p1": [
+          {
+            "id": "P1-01",
+            "title": "Phân loại lỗi khóa chưa chính xác — EPERM và EACCES có thể xuất phát từ lỗi quyền truy cập thật sự, không nhất thiết là tranh chấp khóa. Nên chỉ retry những lỗi tạm thời đã xác định; lỗi quyền truy cập kéo dài phải được báo rõ, thay vì chuyển thành LOCKTIMEOUT."
+          },
+          {
+            "id": "P1-02",
+            "title": "TD-11 chưa bảo đảm tạo ra tranh chấp thực sự — Khởi chạy nhiều tiến trình bằng spawn không có nghĩa chúng sẽ cùng vào critical section. Nên bổ sung startup barrier, tăng thời gian giữ khóa có kiểm soát trong môi trường test, lặp lại nhiều vòng và xác minh từng fingerprint thay vì chỉ kiểm tra tổng số bản ghi."
+          },
+          {
+            "id": "P1-03",
+            "title": "TD-12 chưa kiểm chứng đầy đủ ownership safety — Kế hoạch hiện chỉ kiểm tra timeout và stale eviction, chưa kiểm tra tình huống chủ khóa cũ tiếp tục chạy sau khi khóa bị thu hồi. Nên bổ sung kiểm thử tái hiện trực tiếp lịch thực thi của P0-01 và P0-03."
+          },
+          {
+            "id": "P1-04",
+            "title": "TD-13 chưa chứng minh tích hợp thực sự với Review Policy — Việc gọi riêng parseSeverityReport, applySeverityGate, appendTechDebt và resolveTechDebt chỉ xác minh luồng ghép hàm. Nên kiểm tra cả entrypoint thực tế của reviewpolicy.mjs, đồng thời bảo đảm bộ test và bằng chứng có thể được QA đánh giá khi reviewbundle không chứa .agents/."
+          },
+          {
+            "id": "P1-05",
+            "title": "Chưa có hợp đồng validate LockOptions — Cần kiểm tra timeoutMs, staleMs, retryMinMs, retryMaxMs là các số hữu hạn trong miền hợp lệ, đồng thời bảo đảm retryMinMs <= retryMaxMs. Tránh cấu hình vô tình làm khóa hết hạn ngay hoặc retry bất thường."
+          },
+          {
+            "id": "P1-06",
+            "title": "Chưa xử lý đầy đủ lỗi khi tạo lock payload — Nếu tạo tệp khóa thành công nhưng ghi JSON thất bại, có thể để lại tệp khóa chưa khởi tạo hoàn chỉnh. Nên bổ sung cleanup có kiểm soát và kiểm thử lỗi ghi payload."
+          },
+          {
+            "id": "P1-07",
+            "title": "Phạm vi bảo đảm của 'wx' cần được làm rõ — Cơ chế này phù hợp hơn với hệ thống tệp cục bộ; Node.js lưu ý exclusive open có thể không hoạt động đúng trên một số network filesystem. Nên giới hạn hợp đồng ở local NTFS/POSIX và không mặc định mở rộng sang NFS/SMB."
+          }
+        ],
+        "p2": [
+          {
+            "id": "P2-01",
+            "title": "Số lượng tiến trình TD-11 chưa nhất quán — Kế hoạch mô tả 6 tiến trình nhưng liệt kê 5 tiến trình append và 4 tiến trình resolve. Cần ghi rõ đây là hai giai đoạn, tổng cộng 9 lượt tiến trình, hoặc điều chỉnh kịch bản."
+          }
+        ],
+        "warnings": [],
+        "at": "2026-11-07T23:37:20.061Z"
+      },
+      {
+        "round": 2,
+        "status": "APPROVED",
+        "rawStatus": "APPROVED",
+        "p0": [],
+        "p1": [],
+        "p2": [],
+        "warnings": [],
+        "at": "2026-11-07T23:42:00.935Z"
+      }
+    ]
+  },
+  "task-2-review": {
+    "chatgpt": [
+      {
+        "round": 1,
+        "status": "APPROVED",
+        "rawStatus": "APPROVED",
+        "p0": [],
+        "p1": [
+          {
+            "id": "P1-01",
+            "title": "Lỗi giải phóng khóa bị bỏ qua âm thầm — Trong src/techdebt.mjs, withFileLock() sử dụng finally để gọi fs.unlinkSync(lockPath) nhưng bỏ qua mọi lỗi. Nếu việc xóa khóa thất bại, tệp .lock có thể tồn tại và các Worker tiếp theo liên tục nhận LOCKTIMEOUT. Cần xử lý và ghi nhận lỗi giải phóng khóa, bảo toàn lỗi gốc nếu callback đã thất bại, đồng thời bổ sung kiểm thử mô phỏng unlinkSync thất bại."
+          },
+          {
+            "id": "P1-02",
+            "title": "Chưa có kiểm thử crash thực tế của tiến trình giữ khóa — TD-12 kiểm tra recoverOrphanedLock() bằng PID giả định đã chết, nhưng chưa kiểm tra chu trình tiến trình thực sự bị kill, để lại khóa, sau đó phục hồi ngoại tuyến. Nên bổ sung regression test sử dụng child process thực, xác nhận không xóa khóa khi chủ sở hữu còn sống và khôi phục đúng sau khi tiến trình kết thúc."
+          },
+          {
+            "id": "P1-03",
+            "title": "Chưa kiểm soát callback bất đồng bộ — withFileLock() được thiết kế cho callback đồng bộ, nhưng không từ chối callback trả về Promise. Nếu sử dụng sai API, khóa được giải phóng trước khi thao tác bất đồng bộ hoàn tất, tạo nguy cơ Lost Update. Nên kiểm tra thenable và fail-fast, đồng thời ghi rõ hợp đồng API."
+          }
+        ],
+        "p2": [
+          {
+            "id": "P2-01",
+            "title": "Cần mở rộng kiểm thử concurrency — TD-11 đã kiểm tra 5 tiến trình append và 4 tiến trình resolve, nhưng thực hiện thành hai giai đoạn riêng biệt. Nên bổ sung kịch bản append và resolve chạy xen kẽ trên cùng tệp, lặp lại nhiều lần để tăng khả năng phát hiện lỗi phụ thuộc timing."
+          }
+        ],
+        "warnings": [],
+        "at": "2026-11-07T23:52:05.863Z"
+      }
+    ]
   }
 }

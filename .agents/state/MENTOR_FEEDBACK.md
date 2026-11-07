@@ -2,11 +2,11 @@ STATUS: APPROVED
 
 ISSUE STATUS
 
-[P0-01] RESOLVED — resolveTechDebt đã bổ sung định danh theo fingerprint, bắt buộc taskId khi tìm theo ID, kiểm tra tính duy nhất và bảo đảm không ghi file khi matcher không hợp lệ hoặc mơ hồ.
+- [P0-01] RESOLVED — Đã loại bỏ cơ chế tự động thu hồi stale lock bằng renameSync/unlinkSync khi các Worker cạnh tranh. Chỉ một tiến trình có thể tạo khóa thành công qua fs.openSync(lockPath, 'wx') trên hệ thống tệp cục bộ thuộc phạm vi thiết kế.
 
-[P0-02] RESOLVED — Fingerprint sử dụng SHA-256 trên toàn bộ canonical summary, loại bỏ nguy cơ trùng khóa do cắt 80 ký tự. Xác suất va chạm SHA-256 về thực tế là không đáng kể.
+- [P0-02] RESOLVED — Đã loại bỏ staleMs và mọi cơ chế cướp khóa dựa trên thời gian. Tiến trình giữ khóa lâu hoặc bị tạm dừng không bị các Worker khác thu hồi khóa. Waiter chỉ retry hoặc kết thúc bằng LOCK_TIMEOUT.
 
-[P0-03] RESOLVED — Đã bổ sung hợp đồng sanitize đầu vào, bảo vệ HTML comment, tách dữ liệu Mentor khỏi fingerprint và yêu cầu kiểm thử round-trip Markdown.
+- [P0-03] RESOLVED — Trong giao thức Worker thông thường, không còn đường tự động thay thế khóa khi chủ sở hữu đang thực thi fn(). Vì vậy, thao tác unlinkSync(lockPath) trong finally không thể xóa nhầm khóa của Worker khác, miễn là cơ chế phục hồi ngoại tuyến tuân thủ đúng điều kiện bảo trì đã xác định.
 
 BLOCKING (P0)
 
@@ -14,98 +14,143 @@ BLOCKING (P0)
 
 NON-BLOCKING (P1/P2)
 
-- Không có góp ý mới trong vòng đánh giá này, tuân thủ Convergence Rule.
+- Không bổ sung P1/P2 mới trong vòng đánh giá này, tuân thủ Convergence Rule.
 
-ĐÁNH GIÁ KIẾN TRÚC
-Plan Gate — Passed
+Đánh giá quyết định kiến trúc
 
-Bản thiết kế vòng 2 đã giải quyết đầy đủ ba P0 của vòng trước ở cấp độ hợp đồng thiết kế.
+Bản thiết kế v1.1 đã xử lý đúng nguyên nhân gốc của cả ba lỗi P0 ở vòng trước.
 
 Thành phần
 
 	
 
-Kết luận
+Kết quả
+
+	
+
+Nhận xét
 
 
 
 
-Module boundary
+Atomic lock acquisition
 
 	
 
 Đạt
 
+	
+
+Sử dụng 'wx' phù hợp với phạm vi local filesystem
 
 
 
-Fingerprint & deduplication
+
+Strict mutual exclusion
 
 	
 
 Đạt
 
+	
+
+Không cho phép Worker đang chờ cướp khóa
 
 
 
-Backward compatibility
+
+Ownership-safe release
+
+	
+
+Đạt
+
+	
+
+An toàn theo giao thức không thu hồi khóa trực tuyến
+
+
+
+
+Timeout và retry
+
+	
+
+Đạt
+
+	
+
+Giới hạn thời gian, không retry vô hạn
+
+
+
+
+Offline recovery
+
+	
+
+Đạt có điều kiện
+
+	
+
+Phụ thuộc vào việc duy trì trạng thái bảo trì độc quyền
+
+
+
+
+Multi-process testing
 
 	
 
 Đạt về thiết kế
 
+	
+
+Có startup barrier và kiểm tra fingerprint
 
 
 
-Markdown integrity
+
+Review integration
 
 	
 
 Đạt về thiết kế
 
-
-
-
-Lifecycle management
-
 	
 
-Đạt
+Chuyển logic tích hợp vào src/ để có thể nghiệm thu độc lập
 
+Tài liệu Node.js xác nhận 'wx' từ chối tạo tệp đã tồn tại và process.kill(pid, 0) có thể được sử dụng để kiểm tra sự tồn tại của tiến trình. Những primitive này phù hợp với lựa chọn kiến trúc trong phạm vi đã giới hạn. 
+GitHub
++1
 
+Điều kiện cần bảo toàn khi triển khai
 
+Đây là các ràng buộc thực hiện của thiết kế đã duyệt, không phải P0/P1/P2 mới.
 
-Verification plan
+1. Recovery thực sự ngoại tuyến: Trước khi gọi recoverOrphanedLock, phải dừng các Worker đang hoạt động và ngăn Worker mới khởi chạy cho đến khi phục hồi hoàn tất. Không được coi một lần kiểm tra PID là cơ chế thay thế cho điều kiện này. Thao tác recovery phải được tuần tự hóa ở cấp vận hành.
 
-	
+2. Khóa lỗi hoặc payload không hợp lệ: Nếu tiến trình crash ngay sau openSync('wx') nhưng trước khi ghi hoàn chỉnh JSON, khóa có thể còn tồn tại mà không chứa PID hợp lệ. Không được tự động xóa loại khóa này chỉ dựa vào tuổi tệp. Cần quy trình xử lý thủ công khi đã xác nhận toàn bộ Worker dừng hoạt động.
 
-Đạt
+3. Không nới rộng phạm vi bảo đảm: Chỉ những thao tác ghi tham gia cùng giao thức withFileLock mới được bảo vệ khỏi Lost Update. Không tuyên bố bảo vệ các chương trình bên ngoài ghi trực tiếp vào TECH_DEBT.md.
 
+4. Không suy diễn kết quả kiểm thử: 13/13 PASS và 12/12 PASS hiện là tiêu chí nghiệm thu, chưa phải kết quả đã được xác minh.
 
+Quyết định cuối cùng
 
+PLAN GATE: APPROVED — Task 2 v1.1
 
-Phạm vi triển khai
+Cho phép chuyển sang Implementation Phase với kiến trúc đã duyệt:
 
-	
+Triển khai withFileLock theo phương án Strict Mutual Exclusion.
 
-Phù hợp Task 1
+Tích hợp khóa vào toàn bộ Read–Modify–Write của appendTechDebt và resolveTechDebt.
 
-Trade-off được chấp nhận: Duy trì TECH_DEBT.md làm nguồn dữ liệu chính giúp giảm độ phức tạp và không cần bổ sung database. Cơ chế ghi file tạm rồi rename phù hợp với mô hình một tiến trình ghi tại một thời điểm.
+Hoàn thiện recoverOrphanedLock cùng quy trình bảo trì ngoại tuyến.
 
-Giả định vận hành: Không có hai tiến trình đồng thời thực hiện thao tác read-modify-write trên cùng TECH_DEBT.md. Atomic rename không tự ngăn lost update nếu có nhiều writer song song. Nếu workflow thực tế cho phép ghi đồng thời, cần bổ sung cơ chế đồng bộ trước khi sử dụng trong môi trường đó.
+Bổ sung TD-11, TD-12, TD-13 và chạy các bộ kiểm thử hiện có.
 
-QUYẾT ĐỊNH & BƯỚC TIẾP THEO
+Chuyển sang review-code để QA kiểm tra mã nguồn, tính đúng đắn của các kịch bản concurrency và bằng chứng kiểm thử thực tế.
 
-Cho phép Worker Agent [WORKER_MODEL: pro] triển khai Task 1 theo CURRENT_PLAN.md vòng 2.
-
-Trong quá trình triển khai, cần bảo đảm:
-
-Không thay đổi các module contract đã được duyệt.
-
-Kiểm thử đầy đủ ba P0 đã giải quyết, bao gồm trường hợp lỗi không được làm thay đổi file.
-
-Kiểm tra npm test và npm run test:workflow, đạt các tiêu chí nghiệm thu đã định.
-
-Sau khi triển khai, gửi git diff, git status --short và bằng chứng kiểm thử sang Implementation Gate (review-code).
-
-Kết luận RPIR: Plan Gate được phê duyệt. Chưa có kết luận về chất lượng mã nguồn thực tế; quyền đánh dấu Task 1 hoàn thành chỉ được cấp sau khi Implementation Gate đạt yêu cầu.
+Phạm vi phê duyệt: Phê duyệt thiết kế kỹ thuật CURRENT_PLAN.md v1.1, chưa phải phê duyệt chất lượng code hoặc xác nhận Task 2 hoàn thành.

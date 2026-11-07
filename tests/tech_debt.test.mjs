@@ -1,11 +1,17 @@
 import assert from 'node:assert/strict';
+import childProcess from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import {
   DEFAULT_MAX_TECH_DEBT_PER_ROUND,
+  DEFAULT_LOCK_OPTIONS,
+  validateLockOptions,
+  withFileLock,
+  recoverOrphanedLock,
   sha256Hex,
   sanitizeSingleLineMarkdown,
   sanitizeIssueId,
@@ -16,10 +22,15 @@ import {
   extractExistingFingerprints,
   filterAndRankTechDebt,
   appendTechDebt,
+  ingestMentorTechDebtReport,
   parseTechDebtFile,
   resolveTechDebt,
   summarizeTechDebt,
 } from '../src/tech_debt.mjs';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const MODULE_URL = pathToFileURL(path.resolve(__dirname, '../src/tech_debt.mjs')).href;
 
 test('TD-1: splitIssueTitle, extractTaskIdFromThreadKey và normalizeCanonicalSummary xử lý NFC/NFD & Markdown', () => {
   const s1 = splitIssueTitle('Thiếu kịch bản E2E — Bổ sung các trường hợp biên và lỗi mạng.');
@@ -413,6 +424,365 @@ test('TD-10 [Review P0-02]: resolveTechDebt và parseTechDebtFile bảo toàn b�
     assert.equal(records[0].checked, true);
     assert.equal(records[0].summary, 'Xử lý hàm parse(input) _(legacy)_');
     assert.ok(records[0].resolutionNote.includes('Fixed parse() handling, fn(a, b)'));
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('TD-11 [P1-02 & P2-01]: Kiểm thử tranh chấp thực tế đa tiến trình qua 2 giai đoạn (5 append + 4 resolve = 9 tiến trình Worker)', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'td-concurrency-'));
+  try {
+    const tdFile = path.join(tmpDir, 'TECH_DEBT.md');
+    const barrierPhase1 = path.join(tmpDir, 'barrier-phase1.go');
+    const barrierPhase2 = path.join(tmpDir, 'barrier-phase2.go');
+    const workerScript = path.join(tmpDir, 'worker.mjs');
+
+    fs.writeFileSync(
+      workerScript,
+      `
+import fs from 'node:fs';
+import { appendTechDebt, resolveTechDebt } from ${JSON.stringify(MODULE_URL)};
+
+const [mode, tdFile, barrierFile, payloadJson] = process.argv.slice(2);
+const payload = JSON.parse(payloadJson);
+const readyFile = barrierFile + '.ready.' + payload.workerId;
+fs.writeFileSync(readyFile, '1', 'utf8');
+
+const waitStart = Date.now();
+while (!fs.existsSync(barrierFile)) {
+  if (Date.now() - waitStart > 10000) {
+    throw new Error('Barrier timeout');
+  }
+}
+
+if (mode === 'append') {
+  appendTechDebt(tdFile, payload.items, {
+    threadKey: 'task-2-plan',
+    provider: 'chatgpt',
+    round: payload.workerId,
+    lockOptions: { timeoutMs: 15000, retryMinMs: 5, retryMaxMs: 15, holdDelayMs: 35 },
+  });
+} else if (mode === 'resolve') {
+  resolveTechDebt(
+    tdFile,
+    payload.fingerprint,
+    'Closed by worker-' + payload.workerId,
+    new Date('2026-11-08T00:00:00Z'),
+    { timeoutMs: 15000, retryMinMs: 5, retryMaxMs: 15, holdDelayMs: 25 }
+  );
+}
+`,
+      'utf8'
+    );
+
+    const runWorker = (mode, barrierFile, payload) =>
+      new Promise((resolve, reject) => {
+        const child = childProcess.spawn(
+          process.execPath,
+          [workerScript, mode, tdFile, barrierFile, JSON.stringify(payload)],
+          { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true }
+        );
+        let stderr = '';
+        child.stderr.on('data', (chunk) => {
+          stderr += chunk.toString();
+        });
+        child.on('error', reject);
+        child.on('close', (code) => {
+          if (code !== 0) {
+            reject(new Error(`Worker ${payload.workerId} (${mode}) exited with ${code}: ${stderr}`));
+          } else {
+            resolve();
+          }
+        });
+      });
+
+    const waitUntilAllReady = async (barrierFile, count) => {
+      const start = Date.now();
+      while (Date.now() - start < 10000) {
+        let readyCount = 0;
+        for (let i = 1; i <= count; i += 1) {
+          if (fs.existsSync(`${barrierFile}.ready.${i}`)) readyCount += 1;
+        }
+        if (readyCount === count) return;
+        await new Promise((r) => setTimeout(r, 15));
+      }
+      throw new Error(`Không đủ ${count} tiến trình sẵn sàng tại barrier.`);
+    };
+
+    // Giai đoạn 1: 5 tiến trình cùng append (mỗi tiến trình 3 mục riêng + 1 mục dùng chung = 16 mục duy nhất)
+    const expectedSummaries = ['Mục dùng chung giữa 5 tiến trình đồng thời'];
+    const phase1Promises = [];
+    for (let w = 1; w <= 5; w += 1) {
+      const s1 = `Mục riêng của tiến trình ${w} số 1`;
+      const s2 = `Mục riêng của tiến trình ${w} số 2`;
+      const s3 = `Mục riêng của tiến trình ${w} số 3`;
+      expectedSummaries.push(s1, s2, s3);
+
+      phase1Promises.push(
+        runWorker('append', barrierPhase1, {
+          workerId: w,
+          items: [
+            { id: 'P1-01', title: `${s1} — Chi tiết ${w}.1` },
+            { id: 'P1-02', title: `${s2} — Chi tiết ${w}.2` },
+            { id: 'P2-01', title: `${s3} — Chi tiết ${w}.3` },
+            {
+              id: 'P1-03',
+              title: `Mục dùng chung giữa 5 tiến trình đồng thời — Ghi bởi worker ${w}`,
+            },
+          ],
+        })
+      );
+    }
+
+    await waitUntilAllReady(barrierPhase1, 5);
+    fs.writeFileSync(barrierPhase1, 'GO', 'utf8');
+    await Promise.all(phase1Promises);
+
+    const recordsAfterPhase1 = parseTechDebtFile(fs.readFileSync(tdFile, 'utf8'));
+    assert.equal(recordsAfterPhase1.length, 16);
+
+    const actualFingerprints = new Set(recordsAfterPhase1.map((r) => r.fingerprint));
+    for (const s of expectedSummaries) {
+      const expectedFp = buildTechDebtFingerprint('task-2', s);
+      assert.ok(
+        actualFingerprints.has(expectedFp),
+        `Thiếu fingerprint cho summary "${s}" (${expectedFp})`
+      );
+    }
+
+    // Giai đoạn 2: 4 tiến trình cùng resolve 4 bản ghi cụ thể theo fingerprint
+    const targetsToResolve = [
+      buildTechDebtFingerprint('task-2', 'Mục riêng của tiến trình 1 số 1'),
+      buildTechDebtFingerprint('task-2', 'Mục riêng của tiến trình 2 số 1'),
+      buildTechDebtFingerprint('task-2', 'Mục riêng của tiến trình 3 số 1'),
+      buildTechDebtFingerprint('task-2', 'Mục riêng của tiến trình 4 số 1'),
+    ];
+
+    const phase2Promises = targetsToResolve.map((fp, idx) =>
+      runWorker('resolve', barrierPhase2, {
+        workerId: idx + 1,
+        fingerprint: fp,
+      })
+    );
+
+    await waitUntilAllReady(barrierPhase2, 4);
+    fs.writeFileSync(barrierPhase2, 'GO', 'utf8');
+    await Promise.all(phase2Promises);
+
+    const finalStats = summarizeTechDebt(tdFile);
+    assert.equal(finalStats.total, 16);
+    assert.equal(finalStats.resolved, 4);
+    assert.equal(finalStats.open, 12);
+
+    const finalRecords = parseTechDebtFile(fs.readFileSync(tdFile, 'utf8'));
+    for (const targetFp of targetsToResolve) {
+      const found = finalRecords.find((r) => r.fingerprint === targetFp);
+      assert.ok(found);
+      assert.equal(found.checked, true);
+    }
+
+    // Đảm bảo không còn tệp .lock hoặc .tmp nào sót lại
+    const leftoverLockOrTmp = fs
+      .readdirSync(tmpDir)
+      .filter((name) => name.endsWith('.lock') || name.includes('.tmp.'));
+    assert.deepEqual(leftoverLockOrTmp, []);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('TD-12 [P0-01/P0-02/P0-03/P1-03/P1-05]: Bảo vệ chủ khóa chạy lâu trước nhiều waiter bị LOCK_TIMEOUT, validateLockOptions và recoverOrphanedLock', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'td-lock-safety-'));
+  try {
+    const tdFile = path.join(tmpDir, 'TECH_DEBT.md');
+    const lockFile = `${tdFile}.lock`;
+
+    // 1. Kiểm thử validateLockOptions ([P1-05])
+    assert.throws(() => validateLockOptions({ timeoutMs: -5 }), /INVALID_LOCK_OPTIONS/);
+    assert.throws(
+      () => validateLockOptions({ retryMinMs: 50, retryMaxMs: 10 }),
+      /INVALID_LOCK_OPTIONS/
+    );
+    assert.throws(() => validateLockOptions({ holdDelayMs: -1 }), /INVALID_LOCK_OPTIONS/);
+    assert.equal(DEFAULT_LOCK_OPTIONS.timeoutMs, 5000);
+
+    // 2. Kịch bản P0-01 / P0-02 / P0-03: Chủ khóa A giữ khóa 350ms, hai waiter B và C cạnh tranh với timeout 60ms.
+    // B và C phải ném LOCK_TIMEOUT mà KHÔNG ĐƯỢC cướp hoặc xóa khóa của A; A vẫn hoàn tất ghi và giải phóng khóa an toàn.
+    const holderScript = path.join(tmpDir, 'holder.mjs');
+    const holderReady = path.join(tmpDir, 'holder.ready');
+    fs.writeFileSync(
+      holderScript,
+      `
+import fs from 'node:fs';
+import { withFileLock, appendTechDebt } from ${JSON.stringify(MODULE_URL)};
+
+const [tdFile, holderReady] = process.argv.slice(2);
+withFileLock(tdFile, () => {
+  fs.writeFileSync(holderReady, 'LOCKED', 'utf8');
+  const buf = new Int32Array(new SharedArrayBuffer(4));
+  Atomics.wait(buf, 0, 0, 350);
+  fs.writeFileSync(tdFile, '# TECH_DEBT — Góp ý không chặn (P1/P2) từ Mentor\\n\\n- [ ] **P1-01** Ghi bởi chủ khóa A — Thành công _(task-2 · chatgpt · vòng 1 · 2026-11-08)_ <!-- TD:task-2|' + 'a'.repeat(64) + ' -->\\n', 'utf8');
+}, { timeoutMs: 2000 });
+`,
+      'utf8'
+    );
+
+    const holderProc = childProcess.spawn(
+      process.execPath,
+      [holderScript, tdFile, holderReady],
+      { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true }
+    );
+
+    const waitReadyStart = Date.now();
+    while (!fs.existsSync(holderReady)) {
+      if (Date.now() - waitReadyStart > 5000) {
+        throw new Error('Holder process did not acquire lock in time');
+      }
+      await new Promise((r) => setTimeout(r, 10));
+    }
+
+    // Trong lúc A đang giữ khóa: cả waiter B và waiter C đều bị LOCK_TIMEOUT và không được cướp khóa của A
+    assert.throws(
+      () =>
+        appendTechDebt(
+          tdFile,
+          [{ id: 'P1-02', title: 'Waiter B cố ghi khi khóa bận' }],
+          {
+            threadKey: 'task-2-plan',
+            provider: 'chatgpt',
+            round: 1,
+            lockOptions: { timeoutMs: 60, retryMinMs: 10, retryMaxMs: 20 },
+          }
+        ),
+      /LOCK_TIMEOUT/
+    );
+    assert.throws(
+      () =>
+        appendTechDebt(
+          tdFile,
+          [{ id: 'P1-03', title: 'Waiter C cố ghi khi khóa bận' }],
+          {
+            threadKey: 'task-2-plan',
+            provider: 'chatgpt',
+            round: 1,
+            lockOptions: { timeoutMs: 60, retryMinMs: 10, retryMaxMs: 20 },
+          }
+        ),
+      /LOCK_TIMEOUT/
+    );
+
+    // Tệp khóa của A vẫn phải còn tồn tại khi A đang chạy
+    assert.equal(fs.existsSync(lockFile), true);
+
+    await new Promise((resolve, reject) => {
+      holderProc.on('error', reject);
+      holderProc.on('close', (code) => {
+        if (code !== 0) reject(new Error(`Holder exited with code ${code}`));
+        else resolve();
+      });
+    });
+
+    // Sau khi A kết thúc: khóa được dọn sạch và dữ liệu của A nguyên vẹn
+    assert.equal(fs.existsSync(lockFile), false);
+    const recordsAfterHolder = parseTechDebtFile(fs.readFileSync(tdFile, 'utf8'));
+    assert.equal(recordsAfterHolder.length, 1);
+    assert.equal(recordsAfterHolder[0].summary, 'Ghi bởi chủ khóa A');
+
+    // 3. Kiểm thử recoverOrphanedLock:
+    // 3a. Khi PID là tiến trình đang sống (process.pid) -> từ chối thu hồi với LOCK_OWNER_ALIVE
+    fs.writeFileSync(
+      lockFile,
+      JSON.stringify({ pid: process.pid, token: 'live-token', createdAt: Date.now() - 60000 }),
+      'utf8'
+    );
+    assert.throws(() => recoverOrphanedLock(tdFile), /LOCK_OWNER_ALIVE/);
+    assert.equal(fs.existsSync(lockFile), true);
+
+    // 3b. Khi tệp khóa bị hỏng JSON -> ném CORRUPT_LOCK_PAYLOAD và không tự xóa
+    fs.writeFileSync(lockFile, '{corrupt-json', 'utf8');
+    assert.throws(() => recoverOrphanedLock(tdFile), /CORRUPT_LOCK_PAYLOAD/);
+    assert.equal(fs.existsSync(lockFile), true);
+
+    // 3c. Khi PID là tiến trình đã chết (999999 -> ESRCH) -> thu hồi thành công
+    fs.writeFileSync(
+      lockFile,
+      JSON.stringify({ pid: 999999, token: 'dead-token-123', createdAt: Date.now() - 60000 }),
+      'utf8'
+    );
+    const recovery = recoverOrphanedLock(tdFile);
+    assert.deepEqual(recovery, {
+      recovered: true,
+      deadPid: 999999,
+      token: 'dead-token-123',
+    });
+    assert.equal(fs.existsSync(lockFile), false);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('TD-13 [P1-01/P1-04]: Kiểm thử tích hợp End-to-End luồng tiếp nhận báo cáo Mentor (ingestMentorTechDebtReport -> resolveTechDebt -> summarizeTechDebt)', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'td-e2e-review-'));
+  try {
+    const tdFile = path.join(tmpDir, 'TECH_DEBT.md');
+    const now = new Date('2026-11-08T00:00:00Z');
+
+    // Vòng 1 (Plan Gate): Tiếp nhận báo cáo từ Mentor
+    const round1Report = {
+      p1: [
+        { id: 'P1-01', title: 'Bổ sung kiểm tra đầu vào cho cấu hình khóa — Tránh giá trị âm' },
+        { id: 'P1-02', title: 'Kiểm thử tranh chấp đa tiến trình — Cần dùng startup barrier' },
+      ],
+      p2: [
+        { id: 'P2-01', title: 'Không có.' }, // Nhiễu -> tự động bị lọc bỏ
+        { id: 'P2-02', title: 'Làm rõ số lượng tiến trình trong tài liệu — Ghi rõ 5 + 4 = 9' },
+      ],
+    };
+
+    const addedR1 = ingestMentorTechDebtReport(
+      tdFile,
+      round1Report,
+      { threadKey: 'task-2-plan', provider: 'chatgpt', round: 1 },
+      now
+    );
+    assert.equal(addedR1, 3);
+
+    // Vòng 2 (Code Review Gate): Gửi lại 1 mục trùng + 1 mục mới ở vòng 2 (tự động gắn cờ late)
+    const round2Report = {
+      p1: [
+        { id: 'P1-01', title: 'Bổ sung kiểm tra đầu vào cho cấu hình khóa — Đã nhắc ở vòng 1' },
+      ],
+      p2: [
+        { id: 'P2-01', title: 'Thêm chú thích JSDoc cho recoverOrphanedLock — Ghi rõ điều kiện offline' },
+      ],
+    };
+
+    const addedR2 = ingestMentorTechDebtReport(
+      tdFile,
+      round2Report,
+      { threadKey: 'task-2-review', provider: 'chatgpt', round: 2 },
+      now
+    );
+    assert.equal(addedR2, 1);
+
+    // Đóng 2 mục P1 đã hoàn thành
+    const resolvedCount = resolveTechDebt(
+      tdFile,
+      [
+        { taskId: 'task-2', summary: 'Bổ sung kiểm tra đầu vào cho cấu hình khóa' },
+        { taskId: 'task-2', summary: 'Kiểm thử tranh chấp đa tiến trình' },
+      ],
+      'Đã hoàn thành trong Task 2 (withFileLock & TD-11/TD-12)',
+      now
+    );
+    assert.equal(resolvedCount, 2);
+
+    const stats = summarizeTechDebt(tdFile);
+    assert.equal(stats.total, 4);
+    assert.equal(stats.resolved, 2);
+    assert.equal(stats.open, 2);
+    assert.deepEqual(stats.byLevel.P1, { open: 0, resolved: 2 });
+    assert.deepEqual(stats.byLevel.P2, { open: 2, resolved: 0 });
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }

@@ -1,14 +1,15 @@
 # HANDOFF: Trạng thái Bàn giao Phiên làm việc
 
 ## 1. Bối cảnh & Kết quả đã hoàn thành
-- Dự án: `AI-WorkFlow` (đã đồng bộ tự động với Project `AI-WorkFlow` trên ChatGPT ở chế độ `Trò chuyện` + hỗ trợ `@Plugin` chuyên gia + chèn prompt trực tiếp không tạo file `Văn bản đã dán.txt`).
-- **Đã hoàn thành trọn vẹn chu trình RPIR 6 bước cho `Task 1` (`[x]` trong `ROADMAP.md`)**:
-  1. **Plan Gate (`task-1-plan`)**: Chuyên gia `@Software System Architect` review 2 vòng (`STATUS: REJECTED` ở Vòng 1 với 3 P0 -> `STATUS: APPROVED` ở Vòng 2 sau khi bổ sung hợp đồng SHA-256 fingerprint, fail-closed `resolveTechDebt` và sanitize Markdown 1 dòng).
-  2. **Implement (`src/tech_debt.mjs` & `tests/tech_debt.test.mjs`)**: Triển khai đầy đủ `appendTechDebt`, `filterAndRankTechDebt`, `parseTechDebtFile`, `resolveTechDebt`, `summarizeTechDebt`, `writeFileAtomic`, `buildTechDebtFingerprint` và tích hợp vào `.agents/scripts/review_policy.mjs`.
-  3. **Code Review Gate (`task-1-review`)**: Chuyên gia `@Independent QA & Gate Reviewer` review 2 vòng:
-     - Vòng 1 phát hiện 2 lỗi P0 thực tế (`[P0-01]` cắt `maxItems` trước khi loại fingerprint đã tồn tại; `[P0-02]` regex `parseTechDebtFile` vỡ khi `resolutionNote` chứa dấu ngoặc đơn `()`).
-     - Vòng 2 xác nhận cả 2 P0 đã `RESOLVED`, đạt **`CODE_STATUS: APPROVED`** với `npm test` **10/10 PASS** và `npm run test:workflow` **12/12 PASS**.
-  4. **Quản lý vòng đời `TECH_DEBT.md`**: Đã dùng `resolveTechDebt()` đánh dấu hoàn thành `[x]` cho 6/10 mục P1/P2 đã giải quyết trong quá trình thực hiện `Task 1` (còn 4 mục mở để theo dõi ở các task tiếp theo).
+- Dự án: `AI-WorkFlow` (đã đồng bộ tự động với Project `AI-WorkFlow` trên ChatGPT ở chế độ `Trò chuyện` + hỗ trợ `@Plugin` chuyên gia + xoay vòng luồng chat tự động theo từng Task).
+- **Đã hoàn thành trọn vẹn cả 2 Task trong `ROADMAP.md` (`[x]` Task 1 & `[x]` Task 2)**:
+  - **Task 1 (`bb3b311`)**: Xây dựng module quản lý vòng đời Nợ Kỹ thuật (`src/tech_debt.mjs` & `tests/tech_debt.test.mjs`) với fingerprint SHA-256 trên toàn bộ canonical summary, khử trùng lặp trước `maxItems`, sanitize Markdown 1 dòng và `resolveTechDebt` fail-closed.
+  - **Task 2**:
+    1. **Plan Gate (`task-2-plan`)**: Tự động mở luồng chat mới trong Project `AI-WorkFlow` (`https://chatgpt.com/g/g-p-6aefa6fbc5a0819181753779c51e396d-ai-workflow/c/6aefb5af-8c54-83ec-9f5c-99771d615203`). Sau 2 vòng review với `@Software System Architect`, thống nhất thiết kế **Strict Mutual Exclusion (Phương án A)** dùng `fs.openSync(lockPath, 'wx')`, không tự động cướp khóa theo tuổi tệp để loại bỏ hoàn toàn 3 lỗi TOCTOU/Race Condition (`[P0-01]`, `[P0-02]`, `[P0-03]`), kèm công cụ bảo trì ngoại tuyến `recoverOrphanedLock(filePath)` có kiểm tra `isProcessAlive(pid)`.
+    2. **Implement (`src/tech_debt.mjs` & `tests/tech_debt.test.mjs`)**: Triển khai `withFileLock`, `validateLockOptions`, `recoverOrphanedLock`, `ingestMentorTechDebtReport`, bọc toàn bộ chu trình Read–Modify–Write của `appendTechDebt` và `resolveTechDebt`, và bổ sung 3 bài kiểm thử `TD-11` (9 tiến trình Worker cạnh tranh thực tế qua startup barrier), `TD-12` (bảo vệ chủ khóa chạy lâu trước nhiều waiter bị `LOCK_TIMEOUT` + `recoverOrphanedLock`), `TD-13` (tích hợp End-to-End `ingestMentorTechDebtReport`).
+    3. **Code Review Gate (`task-2-review`)**: Chuyên gia `@Independent QA & Gate Reviewer` phê duyệt **`CODE_STATUS: APPROVED` ngay ở Vòng 1/2** (`https://chatgpt.com/g/g-p-6aefa6fbc5a0819181753779c51e396d-ai-workflow/c/6aefb979-8030-83ec-b9f7-92f13f191939`) với `npm test` đạt **13/13 PASS** và `npm run test:workflow` đạt **12/12 PASS**.
+    4. **Quản lý vòng đời `TECH_DEBT.md`**: Đã giải quyết và đánh dấu `[x]` toàn bộ **10/10** mục nợ kỹ thuật của `Task 1` và **5/9** mục của `Task 2` (tổng cộng `15/19` mục đã đóng).
 
 ## 2. Bước tiếp theo (Next Steps)
-- Bổ sung Task mới vào `.agents/state/ROADMAP.md` (ví dụ: cơ chế file lock chống ghi đồng thời `TECH_DEBT.md` theo góp ý `P1-02`, hoặc áp dụng bộ khung `AI-WorkFlow` cho dự án mới).
+- Nếu muốn tiếp tục nâng cấp sâu hơn cho `src/tech_debt.mjs`, có thể mở **Task 3** để xử lý 4 góp ý P1/P2 còn mở của `task-2-review` (từ chối callback bất đồng bộ `thenable` trong `withFileLock`, xử lý lỗi khi `unlinkSync` thất bại, kiểm thử `SIGKILL` tiến trình con thực tế với `recoverOrphanedLock`, và kiểm thử `append` + `resolve` chạy xen kẽ).
+- Hoặc sử dụng bộ khung `AI-WorkFlow` hiện tại làm template chuẩn cho các dự án phần mềm tiếp theo.

@@ -1,98 +1,55 @@
 CODE_STATUS: APPROVED
 
-Kết luận Independent QA & Gate Reviewer — Vòng 2: Hai lỗi P0 từ vòng trước đã được khắc phục. Đã chạy lại 10 bài kiểm thử từ mã nguồn trích xuất và thực hiện kiểm tra bổ sung trực tiếp. Không phát hiện P0 còn mở trong phạm vi đánh giá.
-
-ISSUE STATUS
-
-[P0-01] RESOLVED — appendTechDebt() đã loại fingerprint tồn tại trước khi áp dụng maxItems. Kiểm thử TD-9 PASS. Kiểm tra độc lập xác nhận 5 mục cũ + 1 mục mới được ghi nhận chính xác, tổng cộng 6 mục.
-
-[P0-02] RESOLVED — parseTechDebtFile() đã hỗ trợ ghi chú xử lý chứa dấu ngoặc và cú pháp Markdown. Kiểm thử TD-10 PASS. Kiểm tra độc lập xác nhận resolveTechDebt() xử lý thành công và summarizeTechDebt() giữ đúng số bản ghi.
-
 BLOCKING (P0)
 
 - Không có.
 
 NON-BLOCKING (P1/P2)
 
-Không bổ sung góp ý P1/P2 mới trong vòng hội tụ này. Các mục tồn đọng từ vòng trước được giữ nguyên để theo dõi trong TECH_DEBT.md:
+[P1-01] Lỗi giải phóng khóa bị bỏ qua âm thầm — Trong src/tech_debt.mjs, withFileLock() sử dụng finally để gọi fs.unlinkSync(lockPath) nhưng bỏ qua mọi lỗi. Nếu việc xóa khóa thất bại, tệp .lock có thể tồn tại và các Worker tiếp theo liên tục nhận LOCK_TIMEOUT. Cần xử lý và ghi nhận lỗi giải phóng khóa, bảo toàn lỗi gốc nếu callback đã thất bại, đồng thời bổ sung kiểm thử mô phỏng unlinkSync thất bại. 
+review_bundle_1794095433378_23228.txt
 
-[P1-01] Xác minh tích hợp thực tế với review_policy.mjs.
+[P1-02] Chưa có kiểm thử crash thực tế của tiến trình giữ khóa — TD-12 kiểm tra recoverOrphanedLock() bằng PID giả định đã chết, nhưng chưa kiểm tra chu trình tiến trình thực sự bị kill, để lại khóa, sau đó phục hồi ngoại tuyến. Nên bổ sung regression test sử dụng child process thực, xác nhận không xóa khóa khi chủ sở hữu còn sống và khôi phục đúng sau khi tiến trình kết thúc. 
+review_bundle_1794095433378_23228.txt
 
-[P1-02] Kiểm thử và kiểm soát cập nhật file đồng thời giữa các Worker.
+[P1-03] Chưa kiểm soát callback bất đồng bộ — withFileLock() được thiết kế cho callback đồng bộ, nhưng không từ chối callback trả về Promise. Nếu sử dụng sai API, khóa được giải phóng trước khi thao tác bất đồng bộ hoàn tất, tạo nguy cơ Lost Update. Nên kiểm tra thenable và fail-fast, đồng thời ghi rõ hợp đồng API. 
+review_bundle_1794095433378_23228.txt
 
-[P2-01] Cải thiện báo cáo test runner — đã chuyển sang node:test trong bản sửa hiện tại.
+[P2-01] Cần mở rộng kiểm thử concurrency — TD-11 đã kiểm tra 5 tiến trình append và 4 tiến trình resolve, nhưng thực hiện thành hai giai đoạn riêng biệt. Nên bổ sung kịch bản append và resolve chạy xen kẽ trên cùng tệp, lặp lại nhiều lần để tăng khả năng phát hiện lỗi phụ thuộc timing. 
+review_bundle_1794095433378_23228.txt
 
-Kết quả nghiệm thu
+KẾT QUẢ NGHIỆM THU
 
-Tiêu chí
+Tests báo cáo
 
-	
+13/13
 
-Kết quả
-
-
-
-
-npm test được cung cấp
-
-	
-
-10/10 PASS
-
-
-
-
-Chạy lại kiểm thử độc lập
-
-	
-
-10/10 PASS
-
-
-
-
-Regression P0-01
-
-	
-
-PASS
-
-
-
-
-Regression P0-02
-
-	
-
-PASS
-
-
-
-
-Kiểm tra ghi chú đặc biệt
-
-	
-
-PASS
-
-
-
-
-P0 còn mở
-
-	
+Exit code
 
 0
 
+P0 còn mở
 
+0
 
+Đã đối chiếu nội dung báo cáo kiểm thử, git diff và mã nguồn test trong bundle đính kèm. Chưa chạy npm test độc lập trong repository thực tế.
 
-Implementation Gate
+Các tiêu chí chính được đáp ứng theo bằng chứng cung cấp:
 
-	
+Khóa được tạo bằng fs.openSync(lockPath, 'wx'), không sử dụng stale-lock takeover tự động.
 
-APPROVED
+appendTechDebt() và resolveTechDebt() thực hiện read-modify-write bên trong vùng khóa.
 
-Quyết định Gate: Cho phép tiếp tục quy trình RPIR và chuyển sang bước tiếp theo. Không yêu cầu thêm vòng sửa P0.
+TD-11 kiểm tra tranh chấp đa tiến trình, số lượng bản ghi cuối cùng và trạng thái resolve.
 
-Phạm vi phê duyệt áp dụng cho src/tech_debt.mjs và tests/tech_debt.test.mjs theo review bundle vòng 2. Việc tích hợp end-to-end với review_policy.mjs chưa được xác minh trong bộ bằng chứng này.
+TD-12 kiểm tra timeout, bảo vệ chủ khóa và một số trường hợp phục hồi.
+
+TD-13 kiểm tra luồng ingest → resolve → summarize.
+
+GATE DECISION
+
+APPROVED — Cho phép tiếp tục quy trình RPIR Task 2.
+
+Không phát hiện P0 còn mở trong phạm vi mã nguồn và bằng chứng đã cung cấp. Các vấn đề P1/P2 không chặn Gate theo quy tắc đã chỉ định.
+
+Giới hạn: Đây là kết luận review dựa trên bundle, chưa phải xác nhận thực thi độc lập hoặc đối chiếu đầy đủ với CURRENT_PLAN.md đã phê duyệt. Các finding P1 nên được ghi vào TECH_DEBT.md để theo dõi và xử lý ở vòng tiếp theo.

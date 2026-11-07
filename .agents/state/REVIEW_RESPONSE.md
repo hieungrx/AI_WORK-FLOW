@@ -1,19 +1,13 @@
-# REVIEW_RESPONSE — Phản hồi Khắc phục P0 cho Vòng 2 (`task-1-review`)
+# REVIEW_RESPONSE — Phản hồi Khắc phục P0 cho Vòng 2 (`task-2-plan`)
 
-- **`[P0-01]` (`appendTechDebt` có thể bỏ sót nợ kỹ thuật mới khi áp dụng giới hạn trước khử trùng lặp)**:
-  - **Đã khắc phục triệt để trong `src/tech_debt.mjs`**:
-    - Trong `filterAndRankTechDebt(items, options)` và `appendTechDebt(filePath, items, meta, now)`: đọc `knownFingerprints = extractExistingFingerprints(header)` **trước**, truyền `existingFingerprints: knownFingerprints` vào `filterAndRankTechDebt`.
-    - Quá trình xử lý thực hiện theo đúng thứ tự: (1) lọc nhiễu & chuẩn hóa toàn bộ đầu vào -> (2) khử trùng lặp trong cùng lô (`byCanonical`) -> (3) loại bỏ toàn bộ các mục có `fingerprint` hoặc `legacyKey` đã tồn tại trong `TECH_DEBT.md` (`stats.deduplicatedExisting`) -> (4) xếp hạng `P1` trước `P2` -> (5) mới áp dụng trần `maxItems` lên các mục thực sự mới.
-    - Đã bổ sung regression test **`TD-9 [Review P0-01]`** trong `tests/tech_debt.test.mjs`: ghi 5 mục đầu tiên, sau đó gửi lại 5 mục cũ kèm mục thứ 6 mới -> xác nhận `appendTechDebt` trả về `1` và tổng số mục trong file là `6`.
+- **`[P0-01]` (Race Condition trong cơ chế thu hồi stale lock có thể gây Lost Update)**:
+  - **Đã khắc phục triệt để trong `CURRENT_PLAN.md` (Mục 2.1)**: Chuyển sang **Phương án A** theo đúng khuyến nghị của `@Software System Architect` — loại bỏ hoàn toàn việc tự động thu hồi/đổi tên khóa theo tuổi (`staleMs`) trong `withFileLock()`. Mọi tiến trình chờ (waiters B, C) chỉ lấy khóa qua `fs.openSync(lockPath, 'wx')` và không bao giờ gọi `renameSync`/`unlinkSync` lên `lockPath` đang tồn tại, triệt tiêu hoàn toàn cuộc đua giữa B và C.
 
-- **`[P0-02]` (`resolveTechDebt` có thể khiến bản ghi biến mất khỏi parser và thống kê khi ghi chú chứa dấu ngoặc đóng `()`)**:
-  - **Đã khắc phục triệt để trong `src/tech_debt.mjs`**:
-    - Thay thế biểu thức chính quy đơn giản `_\(Đã xử lý:[^)]+\)_` trong `parseTechDebtFile()` bằng bộ phân tích 2 bước từ phải sang trái:
-      1. Tách khung ngoài `^\s*-\s*\[([ xX])\]\s+\*\*([^*]+)\*\*\s+(.*?)\s*<!--\s*TD:(.*?)\s*-->\s*$`.
-      2. Tách hậu tố `_(Đã xử lý: ...)_` bằng `/^(.*\s+_\([^()]+\)_)\s+_\(Đã xử lý:\s*(.*)\)_$/`, cho phép `resolutionNote` chứa bất kỳ số lượng ngoặc đơn `()`, `_(...)_`, liên kết Markdown `[text](url)` hoặc ký tự đặc biệt mà không làm vỡ parser.
-      3. Tách `rawBody` và `metaText` bằng `/^(.*)\s+_\(([^()]+)\)_$/` và trả về thêm trường `resolutionNote` trong mỗi bản ghi của `parseTechDebtFile()`.
-    - Đã bổ sung regression test **`TD-10 [Review P0-02]`** trong `tests/tech_debt.test.mjs` với ghi chú `'Fixed parse() handling, fn(a, b) & _(sub-note)_ [PR #12](https://example.com/pr/12) <!-- comment -->'`, xác nhận `summarizeTechDebt()` trả về `total = 1, open = 0, resolved = 1` và `parseTechDebtFile()` giữ nguyên đầy đủ bản ghi.
+- **`[P0-02]` (Khóa của tiến trình còn sống có thể bị thu hồi sau 10 giây)**:
+  - **Đã khắc phục triệt để trong `CURRENT_PLAN.md` (Mục 2.1 & 2.3)**: Bỏ cơ chế hết hạn khóa theo thời gian (`staleMs`) trong `withFileLock()`. Một tiến trình đang giữ khóa dù thực thi lâu hay bị OS tạm dừng vẫn giữ nguyên quyền độc quyền cho tới khi kết thúc `fn()` và giải phóng khóa trong `finally`. Các waiter vượt quá `timeoutMs` sẽ dừng với `LOCK_TIMEOUT` mà không xâm phạm khóa của tiến trình đang chạy.
 
-- **Về các góp ý `P1/P2` không chặn**:
-  - **`[P2-01]`**: Đã chuyển `tests/tech_debt.test.mjs` sang dùng `import { test } from 'node:test'`, giúp `npm test` xuất báo cáo TAP chi tiết từng test case (`1..10`, `# tests 10`, `# pass 10`).
-  - **`[P1-01]`**: Theo quy tắc bảo vệ công cụ tại Mục 3 `GEMINI.md` (*"Ở chế độ `--mode review-code`, chỉ gửi kết quả chạy `npm test` + `git diff HEAD -- src/ tests/`. Tuyệt đối KHÔNG gửi kèm code của `.agents/` vào gói review"*), file `.agents/scripts/review_policy.mjs` không nằm trong `review_bundle`, nhưng thực tế đã được tích hợp trực tiếp (`import { appendTechDebt } from '../../src/tech_debt.mjs'`) và chính kết quả chạy `ask_mentor.mjs` ở Vòng 1 vừa rồi đã tự động gọi `appendTechDebt` mới để ghi 3 mục P1/P2 vào `.agents/state/TECH_DEBT.md` (kèm kiểm thử `npm run test:workflow` đạt `12/12 PASS`).
+- **`[P0-03]` (Ownership-Verified Release vẫn có thể xóa khóa của tiến trình khác do TOCTOU)**:
+  - **Đã khắc phục triệt để trong `CURRENT_PLAN.md` (Mục 2.1 & 2.3)**: Do không còn bất kỳ đường tự động cướp khóa nào trong khi chủ khóa đang thực thi `withFileLock()`, tệp `lockPath` tại thời điểm chủ khóa chạy khối `finally` được bảo đảm 100% vẫn là khóa của chính tiến trình đó, loại bỏ hoàn toàn khoảng hở TOCTOU khi giải phóng khóa. Ngoài ra, bổ sung hàm quản trị ngoại tuyến `recoverOrphanedLock(filePath)` có kiểm tra `isProcessAlive(pid)` (`process.kill(pid, 0) === ESRCH`) và chặn bằng lỗi `LOCK_OWNER_ALIVE` nếu tiến trình giữ khóa vẫn đang chạy.
+
+- **Về các góp ý `P1/P2`**:
+  - Đã cập nhật kế hoạch bao gồm: phân loại lỗi chỉ retry trên `EEXIST` (`[P1-01]`), startup barrier + `holdDelayMs` và đối chiếu từng fingerprint cho 2 giai đoạn 5 + 4 = 9 lượt tiến trình trong `TD-11` (`[P1-02]`, `[P2-01]`), kiểm thử chủ khóa chạy lâu trước nhiều waiter bị timeout + kiểm thử `recoverOrphanedLock` trong `TD-12` (`[P1-03]`), bổ sung `ingestMentorTechDebtReport` trong `src/tech_debt.mjs` cho `TD-13` (`[P1-04]`), hợp đồng `validateLockOptions` (`[P1-05]`), xóa tệp khóa ngay nếu lỗi ghi payload sau `openSync('wx')` (`[P1-06]`), và nêu rõ phạm vi bảo đảm trên hệ thống tệp cục bộ POSIX/NTFS (`[P1-07]`).

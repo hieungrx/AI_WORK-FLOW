@@ -5,6 +5,218 @@ import crypto from 'node:crypto';
 
 export const DEFAULT_MAX_TECH_DEBT_PER_ROUND = 5;
 
+export const DEFAULT_LOCK_OPTIONS = Object.freeze({
+  timeoutMs: 5000,
+  retryMinMs: 10,
+  retryMaxMs: 30,
+  holdDelayMs: 0,
+});
+
+const SLEEP_BUFFER = new Int32Array(new SharedArrayBuffer(4));
+
+function sleepSync(ms) {
+  const duration = Math.max(1, Math.trunc(Number(ms) || 1));
+  Atomics.wait(SLEEP_BUFFER, 0, 0, duration);
+}
+
+/**
+ * Kiểm tra tính hợp lệ của cấu hình khóa tệp ([P1-05]).
+ *
+ * @param {{ timeoutMs?: number, retryMinMs?: number, retryMaxMs?: number, holdDelayMs?: number }} [options={}]
+ */
+export function validateLockOptions(options = {}) {
+  if (!options || typeof options !== 'object' || Array.isArray(options)) {
+    throw new Error('INVALID_LOCK_OPTIONS: Tham số options phải là một object.');
+  }
+  const cfg = {
+    timeoutMs:
+      options.timeoutMs === undefined ? DEFAULT_LOCK_OPTIONS.timeoutMs : options.timeoutMs,
+    retryMinMs:
+      options.retryMinMs === undefined ? DEFAULT_LOCK_OPTIONS.retryMinMs : options.retryMinMs,
+    retryMaxMs:
+      options.retryMaxMs === undefined ? DEFAULT_LOCK_OPTIONS.retryMaxMs : options.retryMaxMs,
+    holdDelayMs:
+      options.holdDelayMs === undefined ? DEFAULT_LOCK_OPTIONS.holdDelayMs : options.holdDelayMs,
+  };
+
+  if (!Number.isInteger(cfg.timeoutMs) || cfg.timeoutMs < 0 || cfg.timeoutMs > 300_000) {
+    throw new Error(
+      `INVALID_LOCK_OPTIONS: timeoutMs phải là số nguyên trong đoạn [0, 300000] (nhận: ${cfg.timeoutMs}).`
+    );
+  }
+  if (!Number.isInteger(cfg.retryMinMs) || cfg.retryMinMs < 1 || cfg.retryMinMs > 10_000) {
+    throw new Error(
+      `INVALID_LOCK_OPTIONS: retryMinMs phải là số nguyên trong đoạn [1, 10000] (nhận: ${cfg.retryMinMs}).`
+    );
+  }
+  if (
+    !Number.isInteger(cfg.retryMaxMs) ||
+    cfg.retryMaxMs < cfg.retryMinMs ||
+    cfg.retryMaxMs > 10_000
+  ) {
+    throw new Error(
+      `INVALID_LOCK_OPTIONS: retryMaxMs phải là số nguyên >= retryMinMs và <= 10000 (nhận: ${cfg.retryMaxMs}).`
+    );
+  }
+  if (!Number.isInteger(cfg.holdDelayMs) || cfg.holdDelayMs < 0 || cfg.holdDelayMs > 60_000) {
+    throw new Error(
+      `INVALID_LOCK_OPTIONS: holdDelayMs phải là số nguyên trong đoạn [0, 60000] (nhận: ${cfg.holdDelayMs}).`
+    );
+  }
+  return cfg;
+}
+
+/**
+ * Thực thi hàm đồng bộ `fn()` bên trong khóa độc quyền liên tiến trình gắn với `filePath`
+ * theo giao thức Strict Mutual Exclusion (Phương án A — [P0-01], [P0-02], [P0-03], [P1-01], [P1-06], [P1-07]):
+ * - Tạo khóa nguyên tử qua `fs.openSync(lockPath, 'wx')` trên hệ thống tệp cục bộ (POSIX / NTFS).
+ * - Không tự động cướp hoặc xóa khóa của tiến trình khác theo tuổi tệp để loại bỏ hoàn toàn TOCTOU.
+ * - Chỉ retry khi gặp `EEXIST`; các lỗi quyền truy cập (`EACCES`, `EPERM`, ...) được ném ngay lập tức.
+ *
+ * @template T
+ * @param {string} filePath
+ * @param {() => T} fn
+ * @param {{ timeoutMs?: number, retryMinMs?: number, retryMaxMs?: number, holdDelayMs?: number }} [options={}]
+ * @returns {T}
+ */
+export function withFileLock(filePath, fn, options = {}) {
+  if (typeof filePath !== 'string' || !filePath.trim()) {
+    throw new Error('INVALID_LOCK_TARGET: Đường dẫn filePath cần khóa không được rỗng.');
+  }
+  if (typeof fn !== 'function') {
+    throw new Error('INVALID_LOCK_CALLBACK: Tham số fn phải là một hàm đồng bộ.');
+  }
+  const cfg = validateLockOptions(options);
+  const resolvedTarget = path.resolve(filePath);
+  fs.mkdirSync(path.dirname(resolvedTarget), { recursive: true });
+  const lockPath = `${resolvedTarget}.lock`;
+
+  const startMs = Date.now();
+  const deadlineMs = startMs + cfg.timeoutMs;
+  const token = crypto.randomUUID();
+  let acquired = false;
+
+  while (!acquired) {
+    let fd = null;
+    try {
+      fd = fs.openSync(lockPath, 'wx');
+      const payload = JSON.stringify({
+        pid: process.pid,
+        token,
+        createdAt: Date.now(),
+      });
+      try {
+        fs.writeFileSync(fd, payload, 'utf8');
+        fs.closeSync(fd);
+        fd = null;
+      } catch (writeErr) {
+        if (fd !== null) {
+          try {
+            fs.closeSync(fd);
+          } catch (_closeErr) {}
+          fd = null;
+        }
+        try {
+          fs.unlinkSync(lockPath);
+        } catch (_unlinkErr) {}
+        throw writeErr;
+      }
+      acquired = true;
+    } catch (err) {
+      if (err && err.code === 'EEXIST') {
+        const nowMs = Date.now();
+        if (nowMs >= deadlineMs) {
+          throw new Error(
+            `LOCK_TIMEOUT: Không thể lấy khóa tệp "${lockPath}" sau ${cfg.timeoutMs}ms.`
+          );
+        }
+        const span = cfg.retryMaxMs - cfg.retryMinMs + 1;
+        const rawJitter = cfg.retryMinMs + Math.floor(Math.random() * span);
+        const delayMs = Math.min(rawJitter, Math.max(1, deadlineMs - nowMs));
+        sleepSync(delayMs);
+        continue;
+      }
+      throw err;
+    }
+  }
+
+  try {
+    if (cfg.holdDelayMs > 0) {
+      sleepSync(cfg.holdDelayMs);
+    }
+    return fn();
+  } finally {
+    try {
+      fs.unlinkSync(lockPath);
+    } catch (_releaseErr) {}
+  }
+}
+
+/**
+ * Kiểm tra một tiến trình `pid` còn tồn tại trên hệ thống hay đã kết thúc (`ESRCH`).
+ *
+ * @param {number} pid
+ * @returns {boolean}
+ */
+function isProcessAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    if (err && err.code === 'ESRCH') {
+      return false;
+    }
+    return true;
+  }
+}
+
+/**
+ * Công cụ bảo trì ngoại tuyến: thu hồi tệp `.lock` bị bỏ rơi sau khi tiến trình giữ khóa bị crash cưỡng bức.
+ * - Chỉ được gọi khi toàn bộ Worker đang dừng hoạt động.
+ * - Nếu payload khóa bị hỏng hoặc không có `pid` hợp lệ -> ném `CORRUPT_LOCK_PAYLOAD` (yêu cầu kiểm tra thủ công).
+ * - Nếu `pid` vẫn còn sống -> ném `LOCK_OWNER_ALIVE` và giữ nguyên tệp khóa.
+ *
+ * @param {string} filePath
+ * @returns {{ recovered: boolean, deadPid: number | null, token: string }}
+ */
+export function recoverOrphanedLock(filePath) {
+  if (typeof filePath !== 'string' || !filePath.trim()) {
+    throw new Error('INVALID_LOCK_TARGET: Đường dẫn filePath không được rỗng.');
+  }
+  const resolvedTarget = path.resolve(filePath);
+  const lockPath = `${resolvedTarget}.lock`;
+  if (!fs.existsSync(lockPath)) {
+    return { recovered: false, deadPid: null, token: '' };
+  }
+
+  let parsed = null;
+  try {
+    const raw = fs.readFileSync(lockPath, 'utf8');
+    parsed = JSON.parse(raw);
+  } catch (_err) {
+    throw new Error(
+      `CORRUPT_LOCK_PAYLOAD: Tệp khóa "${lockPath}" không chứa JSON hợp lệ; yêu cầu kiểm tra thủ công khi toàn bộ Worker đã dừng.`
+    );
+  }
+
+  const pid = Number(parsed?.pid);
+  const token = typeof parsed?.token === 'string' ? parsed.token : '';
+  if (!Number.isInteger(pid) || pid <= 0) {
+    throw new Error(
+      `CORRUPT_LOCK_PAYLOAD: Tệp khóa "${lockPath}" không chứa PID nguyên dương hợp lệ.`
+    );
+  }
+
+  if (isProcessAlive(pid)) {
+    throw new Error(
+      `LOCK_OWNER_ALIVE: Tiến trình giữ khóa (PID ${pid}) vẫn đang hoạt động; không được phép thu hồi khóa.`
+    );
+  }
+
+  fs.unlinkSync(lockPath);
+  return { recovered: true, deadPid: pid, token };
+}
+
 const normalizeNewlines = (text) => String(text ?? '').replace(/\r\n/g, '\n');
 
 const NOISE_SUMMARY_REGEX =
@@ -141,6 +353,7 @@ export function buildTechDebtFingerprint(taskIdOrThreadKey, summary) {
 
 /**
  * Ghi file nguyên tử qua file tạm cùng thư mục rồi `renameSync` ([P1-03]).
+ * Có retry ngắn nếu gặp lỗi khóa hệ thống tệp tạm thời trên Windows (`EPERM`, `EACCES`, `EBUSY`).
  *
  * @param {string} filePath
  * @param {string} content
@@ -154,8 +367,29 @@ export function writeFileAtomic(filePath, content) {
     `.${path.basename(filePath)}.tmp.${process.pid}.${Date.now()}.${rand}`
   );
   try {
+    if (fs.existsSync(filePath) && fs.statSync(filePath).isDirectory()) {
+      const dirErr = new Error(`EISDIR: Đích ghi "${filePath}" là một thư mục.`);
+      dirErr.code = 'EISDIR';
+      throw dirErr;
+    }
     fs.writeFileSync(tmpPath, content, 'utf8');
-    fs.renameSync(tmpPath, filePath);
+    let lastRenameErr = null;
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      try {
+        fs.renameSync(tmpPath, filePath);
+        lastRenameErr = null;
+        break;
+      } catch (renameErr) {
+        lastRenameErr = renameErr;
+        const code = renameErr && renameErr.code;
+        if ((code === 'EPERM' || code === 'EACCES' || code === 'EBUSY') && attempt < 4) {
+          sleepSync(15);
+          continue;
+        }
+        throw renameErr;
+      }
+    }
+    if (lastRenameErr) throw lastRenameErr;
   } catch (err) {
     try {
       if (fs.existsSync(tmpPath)) {
@@ -333,69 +567,124 @@ export function filterAndRankTechDebt(items, options = {}) {
 }
 
 /**
- * Nối các mục P1/P2 vào `TECH_DEBT.md` với cơ chế khử trùng lặp theo fingerprint SHA-256
- * trước khi áp dụng giới hạn `maxItems` và ghi file nguyên tử ([P0-01], [P0-02], [P0-03], [P1-01], [P1-03]).
+ * Nối các mục P1/P2 vào `TECH_DEBT.md` với cơ chế khóa tệp độc quyền liên tiến trình (`withFileLock`),
+ * khử trùng lặp theo fingerprint SHA-256 trước khi áp dụng giới hạn `maxItems` và ghi file nguyên tử
+ * ([P0-01], [P0-02], [P0-03], [P1-01], [P1-02], [P1-03]).
  *
  * @param {string} filePath
  * @param {Array<{ id: string, title: string, late?: boolean }>} items
- * @param {{ threadKey?: string, taskId?: string, provider?: string, round?: number, maxItems?: number }} [meta={}]
+ * @param {{
+ *   threadKey?: string,
+ *   taskId?: string,
+ *   provider?: string,
+ *   round?: number,
+ *   maxItems?: number,
+ *   lockOptions?: { timeoutMs?: number, retryMinMs?: number, retryMaxMs?: number, holdDelayMs?: number }
+ * }} [meta={}]
  * @param {Date} [now=new Date()]
  * @returns {number} Số lượng mục mới được ghi thêm
  */
 export function appendTechDebt(filePath, items, meta = {}, now = new Date()) {
+  const lockOpts = meta?.lockOptions ? validateLockOptions(meta.lockOptions) : {};
   if (!Array.isArray(items) || items.length === 0) return 0;
 
-  const existing = fs.existsSync(filePath)
-    ? normalizeNewlines(fs.readFileSync(filePath, 'utf8'))
-    : '';
-  const header = existing || '# TECH_DEBT — Góp ý không chặn (P1/P2) từ Mentor\n\n';
-  const knownFingerprints = extractExistingFingerprints(header);
+  return withFileLock(
+    filePath,
+    () => {
+      const existing = fs.existsSync(filePath)
+        ? normalizeNewlines(fs.readFileSync(filePath, 'utf8'))
+        : '';
+      const header = existing || '# TECH_DEBT — Góp ý không chặn (P1/P2) từ Mentor\n\n';
+      const knownFingerprints = extractExistingFingerprints(header);
 
-  const scopeKey = meta?.taskId || meta?.threadKey || 'task-unknown';
-  const { selected } = filterAndRankTechDebt(items, {
-    maxItems: meta?.maxItems ?? DEFAULT_MAX_TECH_DEBT_PER_ROUND,
-    existingFingerprints: knownFingerprints,
-    taskId: scopeKey,
-    threadKey: meta?.threadKey || '',
-    provider: meta?.provider || '',
-  });
-  if (selected.length === 0) return 0;
+      const scopeKey = meta?.taskId || meta?.threadKey || 'task-unknown';
+      const { selected } = filterAndRankTechDebt(items, {
+        maxItems: meta?.maxItems ?? DEFAULT_MAX_TECH_DEBT_PER_ROUND,
+        existingFingerprints: knownFingerprints,
+        taskId: scopeKey,
+        threadKey: meta?.threadKey || '',
+        provider: meta?.provider || '',
+      });
+      if (selected.length === 0) return 0;
 
-  const threadKey = sanitizeSingleLineMarkdown(
-    String(meta?.threadKey || meta?.taskId || 'task-unknown')
-  )
-    .replace(/[()]/g, ' ')
-    .replace(/\s{2,}/g, ' ')
-    .trim();
-  const provider = sanitizeSingleLineMarkdown(String(meta?.provider || 'mentor'))
-    .replace(/[()]/g, ' ')
-    .replace(/\s{2,}/g, ' ')
-    .trim();
-  const roundNum = Number(meta?.round) || 1;
-  const dateStr = (now instanceof Date ? now : new Date(now)).toISOString().slice(0, 10);
+      const threadKey = sanitizeSingleLineMarkdown(
+        String(meta?.threadKey || meta?.taskId || 'task-unknown')
+      )
+        .replace(/[()]/g, ' ')
+        .replace(/\s{2,}/g, ' ')
+        .trim();
+      const provider = sanitizeSingleLineMarkdown(String(meta?.provider || 'mentor'))
+        .replace(/[()]/g, ' ')
+        .replace(/\s{2,}/g, ' ')
+        .trim();
+      const roundNum = Number(meta?.round) || 1;
+      const dateStr = (now instanceof Date ? now : new Date(now)).toISOString().slice(0, 10);
 
-  const lines = [];
-  for (const item of selected) {
-    const fingerprint = buildTechDebtFingerprint(scopeKey, item.summary);
-    if (knownFingerprints.has(fingerprint)) {
-      continue;
-    }
+      const lines = [];
+      for (const item of selected) {
+        const fingerprint = buildTechDebtFingerprint(scopeKey, item.summary);
+        if (knownFingerprints.has(fingerprint)) {
+          continue;
+        }
 
-    knownFingerprints.add(fingerprint);
-    const tags = [threadKey, provider, `vòng ${roundNum}`];
-    if (item.late) tags.push('late');
+        knownFingerprints.add(fingerprint);
+        const tags = [threadKey, provider, `vòng ${roundNum}`];
+        if (item.late) tags.push('late');
 
-    const bodyText = item.detail ? `${item.summary} — ${item.detail}` : item.summary;
-    lines.push(
-      `- [ ] **${item.id}** ${bodyText} _(${tags.join(' · ')} · ${dateStr})_ <!-- TD:${fingerprint} -->`
-    );
-  }
+        const bodyText = item.detail ? `${item.summary} — ${item.detail}` : item.summary;
+        lines.push(
+          `- [ ] **${item.id}** ${bodyText} _(${tags.join(' · ')} · ${dateStr})_ <!-- TD:${fingerprint} -->`
+        );
+      }
 
-  if (lines.length === 0) return 0;
+      if (lines.length === 0) return 0;
 
-  const baseBody = header.endsWith('\n') ? header : `${header}\n`;
-  writeFileAtomic(filePath, `${baseBody}${lines.join('\n')}\n`);
-  return lines.length;
+      const baseBody = header.endsWith('\n') ? header : `${header}\n`;
+      writeFileAtomic(filePath, `${baseBody}${lines.join('\n')}\n`);
+      return lines.length;
+    },
+    lockOpts
+  );
+}
+
+/**
+ * Tiếp nhận báo cáo phân tích mức độ của Mentor (`{ p1: [...], p2: [...] }`) và ghi nhận
+ * các mục nợ kỹ thuật không chặn vào `TECH_DEBT.md` dưới sự bảo vệ của `withFileLock` ([P1-01], [P1-04]).
+ *
+ * @param {string} filePath
+ * @param {{ p1?: Array<{ id?: string, title?: string, late?: boolean }>, p2?: Array<{ id?: string, title?: string, late?: boolean }> }} report
+ * @param {{
+ *   threadKey?: string,
+ *   taskId?: string,
+ *   provider?: string,
+ *   round?: number,
+ *   maxItems?: number,
+ *   late?: boolean,
+ *   lockOptions?: { timeoutMs?: number, retryMinMs?: number, retryMaxMs?: number, holdDelayMs?: number }
+ * }} [meta={}]
+ * @param {Date} [now=new Date()]
+ * @returns {number}
+ */
+export function ingestMentorTechDebtReport(filePath, report, meta = {}, now = new Date()) {
+  if (!report || typeof report !== 'object') return 0;
+  const isLateRound = Boolean(meta?.late) || Number(meta?.round) > 1;
+  const p1Items = Array.isArray(report.p1)
+    ? report.p1.map((item) => ({
+        ...item,
+        level: 'P1',
+        late: item?.late !== undefined ? Boolean(item.late) : isLateRound,
+      }))
+    : [];
+  const p2Items = Array.isArray(report.p2)
+    ? report.p2.map((item) => ({
+        ...item,
+        level: 'P2',
+        late: item?.late !== undefined ? Boolean(item.late) : isLateRound,
+      }))
+    : [];
+  const combined = [...p1Items, ...p2Items];
+  if (combined.length === 0) return 0;
+  return appendTechDebt(filePath, combined, meta, now);
 }
 
 /**
@@ -551,7 +840,8 @@ function normalizeMatcher(matcher) {
 }
 
 /**
- * Đánh dấu hoàn thành `- [x]` các mục nợ kỹ thuật theo định danh chặt chẽ ([P0-01]).
+ * Đánh dấu hoàn thành `- [x]` các mục nợ kỹ thuật theo định danh chặt chẽ dưới sự bảo vệ
+ * của khóa tệp độc quyền liên tiến trình `withFileLock` ([P0-01], [P1-02]).
  * - Nếu tìm theo `id` mà thiếu `taskId` -> ném lỗi `UNSCOPED_ID_MATCHER`, không sửa file.
  * - Nếu bất kỳ matcher nào khớp `> 1` bản ghi đang mở -> ném lỗi `AMBIGUOUS_MATCH`, không sửa file.
  * - Ghi cập nhật nguyên tử qua `writeFileAtomic`.
@@ -560,70 +850,85 @@ function normalizeMatcher(matcher) {
  * @param {Array<string | { fingerprint?: string, taskId?: string, id?: string, summary?: string }> | string | object} matchers
  * @param {string} [resolutionNote='']
  * @param {Date} [now=new Date()]
+ * @param {{ timeoutMs?: number, retryMinMs?: number, retryMaxMs?: number, holdDelayMs?: number }} [lockOptions={}]
  * @returns {number} Số bản ghi được chuyển từ `[ ]` sang `[x]`
  */
-export function resolveTechDebt(filePath, matchers, resolutionNote = '', now = new Date()) {
+export function resolveTechDebt(
+  filePath,
+  matchers,
+  resolutionNote = '',
+  now = new Date(),
+  lockOptions = {}
+) {
+  const lockCfg = validateLockOptions(lockOptions);
   const matcherList = Array.isArray(matchers) ? matchers : [matchers];
   if (matcherList.length === 0) return 0;
 
   const normalizedMatchers = matcherList.map(normalizeMatcher);
-  if (!fs.existsSync(filePath)) return 0;
 
-  const rawContent = normalizeNewlines(fs.readFileSync(filePath, 'utf8'));
-  const lines = rawContent.split('\n');
-  const records = parseTechDebtFile(rawContent);
-  const openRecords = records.filter((r) => !r.checked);
+  return withFileLock(
+    filePath,
+    () => {
+      if (!fs.existsSync(filePath)) return 0;
 
-  const lineIndicesToResolve = new Set();
+      const rawContent = normalizeNewlines(fs.readFileSync(filePath, 'utf8'));
+      const lines = rawContent.split('\n');
+      const records = parseTechDebtFile(rawContent);
+      const openRecords = records.filter((r) => !r.checked);
 
-  for (const m of normalizedMatchers) {
-    let candidates = [];
-    if (m.kind === 'fingerprint') {
-      candidates = openRecords.filter(
-        (r) => r.fingerprint === m.fingerprint || r.rawMarker === m.fingerprint
-      );
-    } else if (m.kind === 'id') {
-      candidates = openRecords.filter((r) => r.taskId === m.taskId && r.id === m.id);
-    } else if (m.kind === 'summary') {
-      const needle = normalizeCanonicalSummary(m.summary);
-      if (!needle) {
-        throw new Error('INVALID_MATCHER: Summary tìm kiếm không hợp lệ.');
+      const lineIndicesToResolve = new Set();
+
+      for (const m of normalizedMatchers) {
+        let candidates = [];
+        if (m.kind === 'fingerprint') {
+          candidates = openRecords.filter(
+            (r) => r.fingerprint === m.fingerprint || r.rawMarker === m.fingerprint
+          );
+        } else if (m.kind === 'id') {
+          candidates = openRecords.filter((r) => r.taskId === m.taskId && r.id === m.id);
+        } else if (m.kind === 'summary') {
+          const needle = normalizeCanonicalSummary(m.summary);
+          if (!needle) {
+            throw new Error('INVALID_MATCHER: Summary tìm kiếm không hợp lệ.');
+          }
+          candidates = openRecords.filter((r) => {
+            if (m.taskId && r.taskId !== m.taskId) return false;
+            return normalizeCanonicalSummary(r.summary).includes(needle);
+          });
+        }
+
+        if (candidates.length > 1) {
+          throw new Error(
+            `AMBIGUOUS_MATCH: Điều kiện (${m.kind}) khớp ${candidates.length} bản ghi đang mở. Hãy chỉ định bằng fingerprint đầy đủ.`
+          );
+        }
+
+        if (candidates.length === 1) {
+          lineIndicesToResolve.add(candidates[0].lineIndex);
+        }
       }
-      candidates = openRecords.filter((r) => {
-        if (m.taskId && r.taskId !== m.taskId) return false;
-        return normalizeCanonicalSummary(r.summary).includes(needle);
-      });
-    }
 
-    if (candidates.length > 1) {
-      throw new Error(
-        `AMBIGUOUS_MATCH: Điều kiện (${m.kind}) khớp ${candidates.length} bản ghi đang mở. Hãy chỉ định bằng fingerprint đầy đủ.`
-      );
-    }
+      if (lineIndicesToResolve.size === 0) return 0;
 
-    if (candidates.length === 1) {
-      lineIndicesToResolve.add(candidates[0].lineIndex);
-    }
-  }
+      const safeNote = sanitizeSingleLineMarkdown(resolutionNote);
+      const dateStr = (now instanceof Date ? now : new Date(now)).toISOString().slice(0, 10);
 
-  if (lineIndicesToResolve.size === 0) return 0;
+      for (const lineIdx of lineIndicesToResolve) {
+        let updatedLine = lines[lineIdx].replace(/^(\s*-\s*)\[\s\]/, '$1[x]');
+        if (safeNote) {
+          updatedLine = updatedLine.replace(
+            /(\s*<!--\s*TD:.*?-->\s*)$/,
+            ` _(Đã xử lý: ${safeNote} · ${dateStr})_$1`
+          );
+        }
+        lines[lineIdx] = updatedLine;
+      }
 
-  const safeNote = sanitizeSingleLineMarkdown(resolutionNote);
-  const dateStr = (now instanceof Date ? now : new Date(now)).toISOString().slice(0, 10);
-
-  for (const lineIdx of lineIndicesToResolve) {
-    let updatedLine = lines[lineIdx].replace(/^(\s*-\s*)\[\s\]/, '$1[x]');
-    if (safeNote) {
-      updatedLine = updatedLine.replace(
-        /(\s*<!--\s*TD:.*?-->\s*)$/,
-        ` _(Đã xử lý: ${safeNote} · ${dateStr})_$1`
-      );
-    }
-    lines[lineIdx] = updatedLine;
-  }
-
-  writeFileAtomic(filePath, lines.join('\n'));
-  return lineIndicesToResolve.size;
+      writeFileAtomic(filePath, lines.join('\n'));
+      return lineIndicesToResolve.size;
+    },
+    lockCfg
+  );
 }
 
 /**
