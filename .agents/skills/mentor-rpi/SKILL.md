@@ -49,10 +49,12 @@ Khi bắt đầu một Task mới hoặc khi kế hoạch cần điều chỉnh 
      ```
      (ví dụ `--task task-3`; nếu không truyền `--task`, script sẽ tự động trích xuất từ tiêu đề `CURRENT_PLAN.md` hoặc mục `[ ]` đầu tiên trong `ROADMAP.md`; có thể thêm `--new-thread` nếu muốn ép tạo luồng chat mới).
    - Script `ask_mentor.mjs` sẽ:
-     - Kiểm tra `.agents/state/SESSION_MAP.json`: nếu `task_id` đã có URL thì điều hướng tới luồng chat đó; nếu là Task mới chưa có URL thì mở phiên chat mới, tự động đính kèm khối `--- NGỮ CẢNH BÀN GIAO DỰ ÁN (BOOTSTRAP) ---` (gồm `ROADMAP.md` và `HANDOFF.md`), và lưu URL `/c/...` mới vào `SESSION_MAP.json`.
+     - Tự động kiểm tra Project trên ChatGPT theo tên dự án Antigravity (`"projectName"` trong `.agents/config.json`, mặc định trùng tên thư mục gốc của Workspace): nếu chưa có Project trên ChatGPT sẽ **tự động bấm tạo Project mới ngay lập tức** và lưu URL `/g/g-p-.../project` vào `SESSION_MAP.json`.
+     - Kiểm tra `.agents/state/SESSION_MAP.json`: nếu `task_id` đã có URL thì điều hướng tới luồng chat đó; nếu là Task mới chưa có URL thì mở phiên chat mới trong Project, tự động đính kèm khối `--- NGỮ CẢNH BÀN GIAO DỰ ÁN (BOOTSTRAP) ---`, và lưu URL `/c/...` mới vào `SESSION_MAP.json`.
      - Đảm bảo mức độ suy luận ở mức **Cao / High** (`ensureHighReasoning(page)`), gửi nội dung `CURRENT_PLAN.md` cho ChatGPT Mentor, đợi phản hồi hoàn tất, ghi đè vào `.agents/state/MENTOR_FEEDBACK.md` và in ra trạng thái `APPROVED` hoặc `REJECTED`.
-   - **Nếu kết quả trả về có `STATUS: APPROVED`**: Tự động chuyển sang **Bước 4 (Implement)** ngay trong cùng phiên chạy.
-   - **Nếu kết quả trả về có `STATUS: REJECTED`**: Phân tích kỹ nhận xét trong `.agents/state/MENTOR_FEEDBACK.md`, chỉnh sửa `.agents/state/CURRENT_PLAN.md` và gọi lại `node .agents/scripts/ask_mentor.mjs --mode plan --task <task_id>`. Tuyệt đối không viết code vào `src/` khi chưa có `STATUS: APPROVED` trong `.agents/state/MENTOR_FEEDBACK.md`.
+   - **Nếu kết quả trả về có `STATUS: APPROVED`**: Tự động chuyển sang **Bước 4 (Implement)** ngay trong cùng phiên chạy (các góp ý `P1/P2` không chặn được tự động ghi vào `.agents/state/TECH_DEBT.md`).
+   - **Nếu kết quả trả về có `STATUS: REJECTED`**: Phân tích kỹ các mục `BLOCKING (P0)` trong `.agents/state/MENTOR_FEEDBACK.md`, chỉnh sửa `.agents/state/CURRENT_PLAN.md` (có thể ghi tóm tắt `ID -> vị trí đã sửa` vào `.agents/state/REVIEW_RESPONSE.md` để gửi kèm bản Delta diff ở vòng tiếp theo) và gọi lại `node .agents/scripts/ask_mentor.mjs --mode plan --task <task_id>`.
+   - **Nếu lệnh thoát với `exitCode === 3` (`ESCALATION`)**: Đã chạm giới hạn vòng của giai đoạn (`stageRounds`: ChatGPT tối đa 3 vòng `plan`, 2 vòng `review-code`, 2 vòng `rescue`; Gemini tối đa 2/2/2). Khối `## ⚠️ ESCALATION` đã được ghi vào `HANDOFF.md` — **Agent BẮT BUỘC dừng ngay và báo người dùng quyết định**, tuyệt đối không tự gọi `--new-thread` hay `--reset-rounds`.
 
 ---
 

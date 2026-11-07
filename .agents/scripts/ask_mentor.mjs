@@ -14,17 +14,62 @@ import {
   loadStateLock,
   saveStateLock,
 } from './verify_guard.mjs';
+import {
+  ESCALATION_EXIT_CODE,
+  EscalationError,
+  resolveMaxRounds,
+  normalizeStageRounds,
+  seedStageRounds,
+  getStageRounds,
+  incrementStageRound,
+  resetStageRounds,
+  checkRoundBudget,
+  buildSeverityRules,
+  parseSeverityReport,
+  applySeverityGate,
+  WARNING_TEXT,
+  appendTechDebt,
+  loadLedger,
+  saveLedger,
+  appendLedgerRound,
+  getOpenIssues,
+  buildConvergenceBlock,
+  detectConvergenceViolations,
+  snapshotPath,
+  readSnapshot,
+  writeSnapshot,
+  computeUnifiedDiff,
+  decidePlanPayload,
+  buildPlanDeltaBody,
+  renderEscalationBlock,
+  upsertEscalation,
+  removeEscalation,
+  hasEscalation,
+  resolveDualMentorPolicy,
+  normalizeMentorFeedback,
+  buildSecondOpinionBlock,
+  renderAdvisorySection,
+  combineDualStatus,
+} from './review_policy.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
 
 const WORKFLOW_CONFIG = loadWorkflowConfig(REPO_ROOT);
-const DEFAULT_PROJECT_NAME = WORKFLOW_CONFIG.projectName || 'AI-WORKSPACE';
+const DEFAULT_PROJECT_NAME =
+  (WORKFLOW_CONFIG.projectName && String(WORKFLOW_CONFIG.projectName).trim()) ||
+  path.basename(REPO_ROOT) ||
+  'AI-WORKSPACE';
 const DEFAULT_CDP_URL = WORKFLOW_CONFIG.cdpUrl || 'http://127.0.0.1:9222';
 const DEFAULT_GEMINI_CDP_URL = WORKFLOW_CONFIG.geminiCdpUrl || 'http://127.0.0.1:9223';
 const DEFAULT_PROJECT_URL = 'https://chatgpt.com/';
 const DEFAULT_GEMINI_URL = 'https://gemini.google.com/app';
+// URL hội thoại Gemini: /app/<id> hoặc /gem/<gemId>/<id> (hỗ trợ tiền tố đa tài khoản /u/<n>/)
+const GEMINI_CONVERSATION_URL_REGEX =
+  /^https:\/\/gemini\.google\.com\/(?:u\/\d+\/)?(?:app|gem\/[^/?#]+)\/([a-z0-9_-]+)/i;
+// URL trang Gem (chưa có hội thoại): https://gemini.google.com/gem/<gemId>
+const GEMINI_GEM_URL_REGEX = /^https:\/\/gemini\.google\.com\/(?:u\/\d+\/)?gem\/[^/?#]+/i;
 const DEFAULT_MODE = 'plan';
 const DEFAULT_PROVIDER = 'chatgpt';
 const VALID_MODES = new Set(['plan', 'review-code', 'rescue']);
@@ -53,19 +98,23 @@ const FEEDBACK_FILE = path.join(STATE_DIR, 'MENTOR_FEEDBACK.md');
 const GEMINI_FEEDBACK_FILE = path.join(STATE_DIR, 'GEMINI_FEEDBACK.md');
 const CODE_REVIEW_FILE = path.join(STATE_DIR, 'CODE_REVIEW_FEEDBACK.md');
 const SESSION_MAP_FILE = path.join(STATE_DIR, 'SESSION_MAP.json');
+const REVIEW_LEDGER_FILE = path.join(STATE_DIR, 'REVIEW_LEDGER.json');
+const TECH_DEBT_FILE = path.join(STATE_DIR, 'TECH_DEBT.md');
+const REVIEW_RESPONSE_FILE = path.join(STATE_DIR, 'REVIEW_RESPONSE.md');
 const SOURCE_DIR_NAME = 'src';
 
 const PROMPT_SELECTOR =
   '#prompt-textarea, div.ProseMirror[data-composer-markdown], div.ProseMirror[contenteditable="true"], [contenteditable="true"][aria-label*="ChatGPT"]';
 const SEND_BUTTON_SELECTOR =
-  '[data-testid="send-button"], button[aria-label="Gửi"], button[aria-label*="Gửi"], button[aria-label="Send prompt"], button[aria-label*="Send"]';
+  'form [data-testid="send-button"]:not([disabled]), form button[aria-label="Gửi"]:not([disabled]), form button[aria-label*="Gửi"]:not([disabled]), form button[aria-label="Send prompt"]:not([disabled]), form button[aria-label*="Send"]:not([disabled]), [data-testid="send-button"]:not([disabled]), button[aria-label="Gửi"]:not([disabled]), button[aria-label="Send prompt"]:not([disabled])';
 const STOP_BUTTON_SELECTOR =
   '[data-testid="stop-button"], button[aria-label*="Ngừng"], button[aria-label*="Dừng"], button[aria-label*="Stop"]';
 const ASSISTANT_MESSAGE_SELECTOR =
-  '[data-message-author-role="assistant"], [class*="--entity-prose-inset"], article[data-turn="assistant"], [data-testid*="conversation-turn"] .markdown';
+  '[data-message-author-role="assistant"], [data-conversation-role="assistant"], [class*="--entity-prose-inset"], article[data-turn="assistant"], [data-testid*="conversation-turn"] .markdown';
 const NEW_CHAT_BUTTON_SELECTOR =
   '[data-testid="create-new-chat-button"], a[data-testid="create-new-chat-button"], nav a[href="/"], a[href="/"]';
-const CONVERSATION_URL_REGEX = /\/(?:g\/[^/]+\/)?c\/([a-z0-9-]+)/i;
+// Bỏ qua URL nháp tạm "local-chatgpt%3A..." của ChatGPT mới, chỉ nhận UUID hội thoại thực từ server
+const CONVERSATION_URL_REGEX = /\/(?:g\/[^/]+\/)?c\/(?!local-chatgpt)([a-z0-9-]{8,})/i;
 
 /**
  * Chuẩn hóa mã định danh Task về dạng `task-<id>` (chữ thường).
@@ -133,13 +182,16 @@ function normalizeEffort(rawEffort) {
  * @param {string[]} argv
  * @returns {{ mode: 'plan' | 'review-code' | 'rescue', provider: 'chatgpt' | 'gemini' | 'both', taskArg: string, roleArg: string, effortArg: string, newThread: boolean, errorSummary: string, model: string, projectName: string, cdpUrl: string }}
  */
-function parseArgs(argv) {
+export function parseArgs(argv) {
   let mode = DEFAULT_MODE;
   let provider = DEFAULT_PROVIDER;
   let taskArg = '';
   let roleArg = '';
   let effortArg = '';
   let newThread = false;
+  let dryRun = false;
+  let resetRounds = false;
+  let ensureProject = false;
   let errorSummary = '';
   let model = '';
   let projectName = '';
@@ -174,6 +226,12 @@ function parseArgs(argv) {
       effortArg = normalizeEffort(arg.slice('--effort='.length));
     } else if (arg === '--new-thread') {
       newThread = true;
+    } else if (arg === '--dry-run') {
+      dryRun = true;
+    } else if (arg === '--reset-rounds') {
+      resetRounds = true;
+    } else if (arg === '--ensure-project') {
+      ensureProject = true;
     } else if (arg === '--error' && i + 1 < argv.length) {
       errorSummary = argv[i + 1].trim();
       i += 1;
@@ -222,6 +280,9 @@ function parseArgs(argv) {
     roleArg,
     effortArg,
     newThread,
+    dryRun,
+    resetRounds,
+    ensureProject,
     errorSummary,
     model,
     projectName,
@@ -407,68 +468,151 @@ function getThreadKey(taskId, mode) {
 }
 
 /**
- * Đọc cấu hình `.agents/state/SESSION_MAP.json`.
- * Nếu chưa tồn tại hoặc lỗi cú pháp, trả về cấu trúc mặc định.
+ * Chuẩn hóa link Gem của Gemini (`.agents/config.json` -> `geminiGemUrl`).
+ * Chỉ chấp nhận dạng `https://gemini.google.com/[u/<n>/]gem/<gemId>`; nếu người dùng dán nhầm link
+ * một cuộc trò chuyện bên trong Gem (`/gem/<gemId>/<conversationId>`), tự động cắt về link gốc của Gem
+ * để mỗi Task mới luôn mở một đoạn chat sạch.
  *
- * @returns {{ projectName: string, projectUrl: string, currentTask: string, threads: Record<string, { url: string, updatedAt: string }> }}
+ * @param {unknown} rawUrl
+ * @returns {string} Link Gem hợp lệ hoặc chuỗi rỗng nếu không hợp lệ / không cấu hình.
  */
-function loadSessionMap() {
+export function normalizeGeminiGemUrl(rawUrl) {
+  if (typeof rawUrl !== 'string') {
+    return '';
+  }
+  const match = rawUrl.trim().match(GEMINI_GEM_URL_REGEX);
+  return match ? match[0] : '';
+}
+
+/**
+ * Trích xuất mã hội thoại Gemini từ URL (`/app/<id>` hoặc `/gem/<gemId>/<id>`).
+ *
+ * @param {string} url
+ * @returns {string} Mã hội thoại (chữ thường) hoặc chuỗi rỗng nếu URL chưa phải là một hội thoại.
+ */
+export function extractGeminiConversationId(url) {
+  if (typeof url !== 'string') {
+    return '';
+  }
+  const match = url.trim().match(GEMINI_CONVERSATION_URL_REGEX);
+  return match ? match[1].toLowerCase() : '';
+}
+
+/**
+ * Chuẩn hóa một bảng luồng chat (`threads` của ChatGPT hoặc `geminiThreads` của Gemini).
+ *
+ * @param {unknown} rawThreads
+ * @returns {Record<string, { url: string, rounds: number, updatedAt: string }>}
+ */
+function normalizeThreadTable(rawThreads) {
+  const table = {};
+  if (!rawThreads || typeof rawThreads !== 'object' || Array.isArray(rawThreads)) {
+    return table;
+  }
+  for (const [key, val] of Object.entries(rawThreads)) {
+    const normKey = normalizeTaskId(key);
+    if (normKey && val && typeof val === 'object' && typeof val.url === 'string') {
+      table[normKey] = {
+        url: val.url.trim(),
+        rounds: typeof val.rounds === 'number' ? val.rounds : 0,
+        updatedAt:
+          typeof val.updatedAt === 'string'
+            ? val.updatedAt
+            : new Date().toISOString(),
+      };
+    }
+  }
+  return table;
+}
+
+/**
+ * Chuẩn hóa đối tượng `SESSION_MAP.json` đã parse (hàm thuần, không đọc/ghi đĩa).
+ *
+ * - `threads`: luồng ChatGPT theo Task & giai đoạn (`task-4-plan`, `task-4-review`, ...).
+ * - `geminiThreads`: "Thư mục Project" riêng cho Gemini — luồng Gemini xoay vòng theo Task & giai đoạn.
+ * - `geminiThreadUrl` (legacy): chỉ còn là con trỏ "luồng Gemini dùng gần nhất", KHÔNG dùng để định tuyến.
+ *   Nếu `geminiThreads` còn trống, URL legacy được di trú vào `<currentTask>-plan` để không mất mạch review.
+ *
+ * @param {unknown} parsed
+ * @returns {{ projectName: string, projectUrl: string, geminiThreadUrl: string, currentTask: string, threads: Record<string, { url: string, rounds: number, updatedAt: string }>, geminiThreads: Record<string, { url: string, rounds: number, updatedAt: string }> }}
+ */
+export function normalizeSessionMap(parsed) {
   const fallback = {
     projectName: DEFAULT_PROJECT_NAME,
     projectUrl: DEFAULT_PROJECT_URL,
     geminiThreadUrl: '',
     currentTask: '',
     threads: {},
+    geminiThreads: {},
+    stageRounds: {},
   };
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return fallback;
+  }
+  const projectName =
+    typeof parsed.projectName === 'string' && parsed.projectName.trim()
+      ? parsed.projectName.trim()
+      : DEFAULT_PROJECT_NAME;
+  const projectUrl =
+    typeof parsed.projectUrl === 'string' && parsed.projectUrl.trim()
+      ? parsed.projectUrl.trim()
+      : DEFAULT_PROJECT_URL;
+  const geminiThreadUrl =
+    typeof parsed.geminiThreadUrl === 'string'
+      ? parsed.geminiThreadUrl.trim()
+      : '';
+  const currentTask =
+    typeof parsed.currentTask === 'string'
+      ? normalizeTaskId(parsed.currentTask)
+      : '';
+  const threads = normalizeThreadTable(parsed.threads);
+  const geminiThreads = normalizeThreadTable(parsed.geminiThreads);
 
+  // Di trú một lần: geminiThreadUrl đơn lẻ (kiểu cũ) -> geminiThreads["<currentTask>-plan"]
+  if (
+    Object.keys(geminiThreads).length === 0 &&
+    currentTask &&
+    extractGeminiConversationId(geminiThreadUrl)
+  ) {
+    geminiThreads[getThreadKey(currentTask, 'plan')] = {
+      url: geminiThreadUrl,
+      rounds: 1,
+      updatedAt: new Date().toISOString(),
+    };
+  }
+
+  const normalizedStageRounds = normalizeStageRounds(parsed.stageRounds);
+  const stageRounds =
+    Object.keys(normalizedStageRounds).length > 0
+      ? normalizedStageRounds
+      : seedStageRounds(threads, geminiThreads);
+
+  return {
+    projectName,
+    projectUrl,
+    geminiThreadUrl,
+    currentTask,
+    threads,
+    geminiThreads,
+    stageRounds,
+  };
+}
+
+/**
+ * Đọc cấu hình `.agents/state/SESSION_MAP.json`.
+ * Nếu chưa tồn tại hoặc lỗi cú pháp, trả về cấu trúc mặc định.
+ *
+ * @returns {ReturnType<typeof normalizeSessionMap>}
+ */
+function loadSessionMap() {
   try {
     if (!fs.existsSync(SESSION_MAP_FILE)) {
-      return fallback;
+      return normalizeSessionMap(null);
     }
     const raw = fs.readFileSync(SESSION_MAP_FILE, 'utf8');
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      return fallback;
-    }
-    const projectName =
-      typeof parsed.projectName === 'string' && parsed.projectName.trim()
-        ? parsed.projectName.trim()
-        : DEFAULT_PROJECT_NAME;
-    const projectUrl =
-      typeof parsed.projectUrl === 'string' && parsed.projectUrl.trim()
-        ? parsed.projectUrl.trim()
-        : DEFAULT_PROJECT_URL;
-    const geminiThreadUrl =
-      typeof parsed.geminiThreadUrl === 'string'
-        ? parsed.geminiThreadUrl.trim()
-        : '';
-    const currentTask =
-      typeof parsed.currentTask === 'string'
-        ? normalizeTaskId(parsed.currentTask)
-        : '';
-    const threads = {};
-    if (
-      parsed.threads &&
-      typeof parsed.threads === 'object' &&
-      !Array.isArray(parsed.threads)
-    ) {
-      for (const [key, val] of Object.entries(parsed.threads)) {
-        const normKey = normalizeTaskId(key);
-        if (normKey && val && typeof val === 'object' && typeof val.url === 'string') {
-          threads[normKey] = {
-            url: val.url.trim(),
-            rounds: typeof val.rounds === 'number' ? val.rounds : 0,
-            updatedAt:
-              typeof val.updatedAt === 'string'
-                ? val.updatedAt
-                : new Date().toISOString(),
-          };
-        }
-      }
-    }
-    return { projectName, projectUrl, geminiThreadUrl, currentTask, threads };
+    return normalizeSessionMap(JSON.parse(raw));
   } catch (_err) {
-    return fallback;
+    return normalizeSessionMap(null);
   }
 }
 
@@ -709,22 +853,34 @@ export function buildRepoSkeleton(
 /**
  * Xây dựng khối `--- NGỮ CẢNH BÀN GIAO DỰ ÁN (BOOTSTRAP) ---` từ `ROADMAP.md`, `HANDOFF.md`
  * và `--- REPO SKELETON MAP ---` khi bắt đầu luồng chat mới (`effectiveNewThread`).
+ * Nếu truyền `planContent` (dùng cho luồng Gemini mới ở giai đoạn `review-code`/`rescue`, nơi prompt
+ * chính không chứa kế hoạch), khối `CURRENT_PLAN.md` được đính kèm để Mentor đối chiếu code với thiết kế.
  *
  * @param {string} taskId
  * @param {string} roadmapContent
  * @param {string} handoffContent
  * @param {string[]} [sourceDirs=REVIEW_SCOPE]
+ * @param {string} [planContent='']
  * @returns {string}
  */
 export function buildBootstrapContext(
   taskId,
   roadmapContent,
   handoffContent,
-  sourceDirs = REVIEW_SCOPE
+  sourceDirs = REVIEW_SCOPE,
+  planContent = ''
 ) {
   const safeRoadmap = roadmapContent || '(Chưa có nội dung ROADMAP.md)';
   const safeHandoff = handoffContent || '(Chưa có nội dung HANDOFF.md)';
   const repoSkeleton = buildRepoSkeleton(sourceDirs);
+  const planSection = planContent
+    ? [
+        '',
+        '=== BẮT ĐẦU .agents/state/CURRENT_PLAN.md (bản thiết kế đã duyệt của Task này) ===',
+        planContent,
+        '=== KẾT THÚC .agents/state/CURRENT_PLAN.md ===',
+      ]
+    : [];
 
   return [
     '--- NGỮ CẢNH BÀN GIAO DỰ ÁN (BOOTSTRAP) ---',
@@ -739,6 +895,7 @@ export function buildBootstrapContext(
     '=== BẮT ĐẦU .agents/state/HANDOFF.md ===',
     safeHandoff,
     '=== KẾT THÚC .agents/state/HANDOFF.md ===',
+    ...planSection,
     '',
     '--- REPO SKELETON MAP ---',
     repoSkeleton,
@@ -917,27 +1074,40 @@ function collectReviewSnapshot(repoRoot = REPO_ROOT) {
  * @param {ReturnType<typeof collectReviewSnapshot> | null} [snapshot=null]
  * @returns {{ prompt: string, positiveTestExitCode: number }}
  */
-function buildMentorPrompt(
+export function buildMentorPrompt(
   mode,
   planContent,
   errorSummary,
   bootstrapBlock = '',
   snapshot = null,
-  selectedRoles = []
+  selectedRoles = [],
+  policyOptions = {}
 ) {
   let corePrompt = '';
   const positiveTestExitCode = snapshot ? snapshot.positiveTestExitCode : 0;
+  const {
+    planBodyOverride = '',
+    convergenceBlock = '',
+    secondOpinionBlock = '',
+    includeSeverityRules = mode !== 'rescue',
+  } = policyOptions || {};
+  const severityBlock = includeSeverityRules ? buildSeverityRules(mode) : '';
 
   if (mode === 'plan') {
+    const planBody =
+      planBodyOverride ||
+      [
+        '--- BẮT ĐẦU CURRENT_PLAN.md ---',
+        planContent,
+        '--- KẾT THÚC CURRENT_PLAN.md ---',
+      ].join('\n');
     corePrompt = [
-      'Bạn là ChatGPT Mentor đánh giá thiết kế kỹ thuật theo quy trình RPIR.',
+      'Bạn là Mentor đánh giá thiết kế kỹ thuật theo quy trình RPIR.',
       'Hãy review chi tiết kế hoạch dưới đây và phản hồi với dòng đầu tiên bắt buộc là:',
       '`STATUS: APPROVED` (nếu kế hoạch đạt yêu cầu, cho phép triển khai code)',
-      'hoặc `STATUS: REJECTED` (nếu cần sửa đổi, kèm các điểm cần khắc phục chi tiết).',
+      'hoặc `STATUS: REJECTED` (chỉ khi có lỗi chặn P0, kèm các điểm cần khắc phục chi tiết).',
       '',
-      '--- BẮT ĐẦU CURRENT_PLAN.md ---',
-      planContent,
-      '--- KẾT THÚC CURRENT_PLAN.md ---',
+      planBody,
     ].join('\n');
   } else if (mode === 'review-code') {
     const { gitStatus, gitDiff, newFilesList, newFilesContent, testEvidence } = snapshot;
@@ -947,11 +1117,11 @@ function buildMentorPrompt(
       : '';
 
     corePrompt = [
-      'Bạn là ChatGPT Mentor thực hiện bước Review Code trong quy trình RPIR.',
+      'Bạn là Mentor thực hiện bước Review Code trong quy trình RPIR.',
       'Hãy kiểm tra kết quả chạy `npm test` và thay đổi mã nguồn ứng dụng (`git diff HEAD -- src/ tests/` kèm các file mới trong `src/`, `tests/`).',
       'Yêu cầu bắt buộc ở dòng đầu tiên của phản hồi:',
-      '- Ghi rõ `CODE_STATUS: APPROVED` nếu code và test đạt yêu cầu.',
-      '- Ghi rõ `CODE_STATUS: REJECTED` nếu có lỗi cần khắc phục.',
+      '- Ghi rõ `CODE_STATUS: APPROVED` nếu code và test đạt yêu cầu (hoặc chỉ còn góp ý P1/P2).',
+      '- Ghi rõ `CODE_STATUS: REJECTED` chỉ khi có lỗi chặn P0 cần khắc phục.',
       '',
       '--- KẾT QUẢ CHẠY NPM TEST ---',
       testEvidence,
@@ -978,7 +1148,7 @@ function buildMentorPrompt(
       'Thử nghiệm / chạy kiểm thử thất bại quá 3 lần liên tiếp (Circuit Breaker kích hoạt).';
 
     corePrompt = [
-      'Bạn là ChatGPT Mentor hỗ trợ gỡ bế tắc kỹ thuật (RESCUE MODE - Circuit Breaker) trong quy trình RPIR.',
+      'Bạn là Mentor hỗ trợ gỡ bế tắc kỹ thuật (RESCUE MODE - Circuit Breaker) trong quy trình RPIR.',
       'Yêu cầu mở đầu phản hồi bằng dòng: `STATUS: REJECTED` kèm hướng dẫn khắc phục cụ thể.',
       '',
       '--- TÓM TẮT LỖI (ERROR SUMMARY) ---',
@@ -993,92 +1163,382 @@ function buildMentorPrompt(
   }
 
   const roleHeader = buildRoleHeader(selectedRoles);
-  const sections = [roleHeader, bootstrapBlock, corePrompt].filter(Boolean);
+  const sections = [
+    roleHeader,
+    bootstrapBlock,
+    convergenceBlock,
+    secondOpinionBlock,
+    corePrompt,
+    severityBlock,
+  ].filter(Boolean);
   const prompt = sections.join('\n\n');
   return { prompt, positiveTestExitCode };
 }
 
 /**
- * Tự động tìm kiếm dự án trên thanh sidebar của ChatGPT theo tên (`projectName`).
- * Nếu tìm thấy, điều hướng vào dự án đó và lưu URL dạng `https://chatgpt.com/g/g-p-...` vào `SESSION_MAP.json`.
- * Nếu chưa có, thử tìm nút tạo Dự án mới với tên đó.
+ * Chuẩn hóa URL của một ChatGPT Project về trang gốc composer của Project:
+ * `https://chatgpt.com/g/g-p-<id>/project` (loại bỏ hậu tố `/c/...` nếu có).
+ *
+ * @param {string} rawUrl
+ * @returns {string}
+ */
+export function normalizeChatGptProjectUrl(rawUrl) {
+  if (typeof rawUrl !== 'string') return '';
+  const m = rawUrl
+    .trim()
+    .match(/^(https:\/\/chatgpt\.com\/g\/g-p-[a-z0-9_-]+)(?:\/project|\/c\/.*|\/|[?#].*)?$/i);
+  return m ? `${m[1]}/project` : '';
+}
+
+/**
+ * Đảm bảo giao diện ChatGPT luôn ở chế độ "ChatGPT" (Chat) tiêu chuẩn chứ không bị kẹt ở chế độ "Codex" / "Work".
  *
  * @param {import('playwright-core').Page} page
- * @param {string} projectName
- * @param {{ projectName?: string, projectUrl: string, currentTask: string, threads: Record<string, { url: string, updatedAt: string }> }} sessionMap
- * @returns {Promise<string>}
  */
-async function ensureProjectUrl(page, sessionMap, projectName = DEFAULT_PROJECT_NAME) {
-  const currentProjectUrl = (sessionMap?.projectUrl || '').trim();
-  if (/^https:\/\/chatgpt\.com\/g\/g-p-[a-z0-9]+/i.test(currentProjectUrl)) {
-    return currentProjectUrl;
+export async function ensureChatGptMode(page) {
+  try {
+    const modeBtn = page
+      .locator('button[aria-label*="Chuyển chế độ" i], button[aria-label*="Switch mode" i]')
+      .first();
+    if (!(await modeBtn.isVisible().catch(() => false))) {
+      return;
+    }
+    const aria = ((await modeBtn.getAttribute('aria-label').catch(() => '')) || '').trim();
+    const txt = ((await modeBtn.innerText().catch(() => '')) || '').trim();
+    const isAlreadyChat =
+      /chế độ hiện tại:\s*chatgpt\b/i.test(aria) ||
+      /current mode:\s*chat(?:gpt)?\b/i.test(aria) ||
+      /^(chatgpt|chat)$/i.test(txt);
+    if (isAlreadyChat) {
+      return;
+    }
+
+    await modeBtn.click({ timeout: 4_000 });
+    await sleep(400);
+    const chatOption = page
+      .locator('[role="menuitem"], [role="menuitemradio"], [role="option"]')
+      .filter({ hasText: /^(ChatGPT|Chat)(\s|\n|$)/i })
+      .first();
+    if (await chatOption.isVisible().catch(() => false)) {
+      await chatOption.click({ timeout: 4_000 });
+      console.log('[MODE GUARD]: Đã tự động chuyển ChatGPT về chế độ "ChatGPT" (Chat).');
+      await sleep(800);
+    } else {
+      await page.keyboard.press('Escape').catch(() => {});
+    }
+  } catch (_err) {
+    await page.keyboard.press('Escape').catch(() => {});
+  }
+}
+
+/**
+ * Đảm bảo thanh bên (sidebar) của ChatGPT đang mở và mục "Dự án" / "Projects" đang xổ ra.
+ *
+ * @param {import('playwright-core').Page} page
+ */
+async function ensureChatGptSidebarOpen(page) {
+  const isSidebarWide = await page
+    .evaluate(() => {
+      const side = document.querySelector(
+        'nav[aria-label="Lịch sử trò chuyện"], nav[aria-label*="Chat history" i], aside'
+      );
+      return Boolean(side && side.getBoundingClientRect().width > 120);
+    })
+    .catch(() => false);
+
+  if (!isSidebarWide) {
+    const openBtn = page
+      .locator(
+        'button[aria-label="Hiện thanh bên"], button[aria-label*="Open sidebar" i], [data-testid="open-sidebar-button"]'
+      )
+      .first();
+    if (await openBtn.isVisible().catch(() => false)) {
+      await openBtn.click({ force: true }).catch(() => {});
+      await sleep(800);
+    }
   }
 
-  const targetName = (projectName || sessionMap?.projectName || DEFAULT_PROJECT_NAME).trim();
-  console.log(`[PROJECT RESOLUTION]: Đang tìm kiếm dự án "${targetName}" trên giao diện ChatGPT...`);
-
-  try {
-    const foundHref = await page.evaluate((name) => {
-      const candidates = Array.from(
-        document.querySelectorAll(
-          'nav a, [role="navigation"] a, a[href*="/g/g-p-"], [role="link"], [role="group"] a, [role="listitem"] a'
-        )
+  // Nếu mục "Dự án" / "Projects" đang bị thu gọn (aria-expanded="false"), bấm mở ra
+  await page
+    .evaluate(() => {
+      const side =
+        document.querySelector(
+          'nav[aria-label="Lịch sử trò chuyện"], nav[aria-label*="Chat history" i], aside'
+        ) || document.body;
+      const projHeader = Array.from(side.querySelectorAll('button')).find((b) =>
+        /^(Dự án|Projects)$/i.test((b.innerText || '').trim())
       );
-      for (const el of candidates) {
-        const text = (el.innerText || '').trim();
-        const ariaLabel = (el.getAttribute('aria-label') || '').trim();
-        const combined = `${text} ${ariaLabel}`.toLowerCase();
-        if (
-          combined.includes(name.toLowerCase()) &&
-          el.href &&
-          el.href.startsWith('https://chatgpt.com/g/g-p-')
-        ) {
-          return el.href;
+      if (projHeader && projHeader.getAttribute('aria-expanded') === 'false') {
+        projHeader.click();
+        return true;
+      }
+      return false;
+    })
+    .then(async (clicked) => {
+      if (clicked) await sleep(500);
+    })
+    .catch(() => {});
+}
+
+/**
+ * Tìm một Project đã tồn tại trên thanh sidebar của ChatGPT (khớp chính xác tên không phân biệt hoa thường).
+ * Hỗ trợ cả giao diện `GPT-6.1 Sol` (folder row + nút `Trò chuyện mới trong <Tên>`) và giao diện `<a>` cũ.
+ *
+ * @param {import('playwright-core').Page} page
+ * @param {string} targetName
+ * @returns {Promise<string>} URL `/g/g-p-.../project` nếu tìm thấy, hoặc chuỗi rỗng `""`.
+ */
+async function findExistingProjectInSidebar(page, targetName) {
+  const action = await page
+    .evaluate((name) => {
+      const lower = name.trim().toLowerCase();
+      const side =
+        document.querySelector(
+          'nav[aria-label="Lịch sử trò chuyện"], nav[aria-label*="Chat history" i], aside'
+        ) || document.body;
+
+      // 1. Khớp trực tiếp thẻ <a href="/g/g-p-..."> có text trùng chính xác tên dự án
+      for (const a of Array.from(side.querySelectorAll('a[href*="/g/g-p-"]'))) {
+        const txt = (a.innerText || '').trim().toLowerCase();
+        const aria = (a.getAttribute('aria-label') || '').trim().toLowerCase();
+        if ((txt === lower || aria === lower) && a.href) {
+          return { kind: 'href', href: a.href };
         }
       }
-      return null;
-    }, targetName);
 
-    if (foundHref) {
-      console.log(`[PROJECT RESOLUTION]: Đã tìm thấy dự án "${targetName}" tại: ${foundHref}`);
-      if (!page.url().startsWith(foundHref)) {
-        await page.goto(foundHref, { waitUntil: 'domcontentloaded' });
+      // 2. Giao diện GPT-6.1 Sol: mỗi dòng dự án có nút `Trò chuyện mới trong <Tên>` / `New chat in <Tên>`
+      const buttons = Array.from(side.querySelectorAll('button[aria-label]'));
+      for (const btn of buttons) {
+        const aria = (btn.getAttribute('aria-label') || '').trim().toLowerCase();
+        if (
+          aria === `trò chuyện mới trong ${lower}` ||
+          aria === `new chat in ${lower}`
+        ) {
+          btn.click();
+          return { kind: 'clicked-new-chat' };
+        }
+      }
+
+      // 3. Fallback: tìm dòng thư mục trong khu vực "Dự án" / "Projects" có text trùng chính xác
+      const allBtns = Array.from(side.querySelectorAll('button'));
+      const projHeader = allBtns.find((b) => /^(Dự án|Projects)$/i.test((b.innerText || '').trim()));
+      const recentHeader = allBtns.find((b) =>
+        /^(Gần đây|Recents|Hôm nay|Today)$/i.test((b.innerText || '').trim())
+      );
+      const minTop = projHeader ? projHeader.getBoundingClientRect().bottom - 2 : 0;
+      const maxTop = recentHeader ? recentHeader.getBoundingClientRect().top + 2 : 99999;
+
+      const rowCandidates = Array.from(side.querySelectorAll('div, span, a, button')).filter((el) => {
+        const r = el.getBoundingClientRect();
+        if (r.width === 0 || r.height === 0 || r.top < minTop || r.top > maxTop) return false;
+        return (el.innerText || '').trim().toLowerCase() === lower;
+      });
+      if (rowCandidates.length > 0) {
+        rowCandidates[0].click();
+        return { kind: 'clicked-row' };
+      }
+
+      return null;
+    }, targetName)
+    .catch(() => null);
+
+  if (!action) return '';
+  if (action.kind === 'href') {
+    return normalizeChatGptProjectUrl(action.href);
+  }
+
+  await page.waitForURL(/\/g\/g-p-[a-z0-9]+/i, { timeout: 10_000 }).catch(() => {});
+  await sleep(1200);
+  return normalizeChatGptProjectUrl(page.url());
+}
+
+/**
+ * Nếu danh sách Dự án có nút "Hiển thị thêm" / "Show more", bấm mở rộng để không tạo trùng Project đã có.
+ *
+ * @param {import('playwright-core').Page} page
+ * @returns {Promise<boolean>}
+ */
+async function expandMoreProjectsIfAvailable(page) {
+  return page
+    .evaluate(() => {
+      const side =
+        document.querySelector(
+          'nav[aria-label="Lịch sử trò chuyện"], nav[aria-label*="Chat history" i], aside'
+        ) || document.body;
+      const allBtns = Array.from(side.querySelectorAll('button'));
+      const projHeader = allBtns.find((b) => /^(Dự án|Projects)$/i.test((b.innerText || '').trim()));
+      const recentHeader = allBtns.find((b) =>
+        /^(Gần đây|Recents|Hôm nay|Today)$/i.test((b.innerText || '').trim())
+      );
+      if (!projHeader) return false;
+      const minTop = projHeader.getBoundingClientRect().bottom;
+      const maxTop = recentHeader ? recentHeader.getBoundingClientRect().top : 99999;
+
+      const showMoreBtn = allBtns.find((b) => {
+        const txt = (b.innerText || '').trim();
+        if (!/^(Hiển thị thêm|Xem thêm|Show more|See more)$/i.test(txt)) return false;
+        const r = b.getBoundingClientRect();
+        return r.width > 0 && r.top > minTop && r.top < maxTop && r.left < 20;
+      });
+      if (showMoreBtn) {
+        showMoreBtn.click();
+        return true;
+      }
+      return false;
+    })
+    .catch(() => false);
+}
+
+/**
+ * Tự động tạo mới một Project trên ChatGPT với tên `targetName` (khớp tên dự án trong Antigravity)
+ * khi kiểm tra trên sidebar chưa tồn tại Project đó.
+ *
+ * @param {import('playwright-core').Page} page
+ * @param {string} targetName
+ * @returns {Promise<string>} URL `/g/g-p-.../project` của Project vừa tạo, hoặc `""` nếu thất bại.
+ */
+async function createChatGptProject(page, targetName) {
+  console.log(
+    `[PROJECT AUTO-CREATE]: Chưa có dự án "${targetName}" trên ChatGPT — đang tự động tạo mới...`
+  );
+  await ensureChatGptSidebarOpen(page);
+
+  const addBtnSelector = [
+    'button[aria-label="Thêm dự án mới"]',
+    'button[aria-label*="Thêm dự án" i]',
+    'button[aria-label="New project" i]',
+    'button[aria-label*="New project" i]',
+    'button[aria-label*="Create project" i]',
+    '[data-testid*="new-project" i]',
+    '[data-testid*="create-project" i]',
+  ].join(', ');
+
+  const addBtn = page.locator(addBtnSelector).first();
+  if ((await addBtn.count().catch(() => 0)) > 0) {
+    await addBtn.scrollIntoViewIfNeeded().catch(() => {});
+    await addBtn.click({ force: true, timeout: 5_000 });
+  } else {
+    // Dự phòng nếu nút tạo nằm trong menu "..." của thanh bên dự án
+    const menuBtn = page
+      .locator(
+        'button[aria-label*="Tùy chọn thanh bên dự án" i], button[aria-label*="Project sidebar options" i]'
+      )
+      .first();
+    if ((await menuBtn.count().catch(() => 0)) > 0) {
+      await menuBtn.click({ force: true, timeout: 4_000 });
+      await sleep(500);
+      const menuItem = page
+        .locator('[role="menuitem"]')
+        .filter({ hasText: /dự án mới|thêm dự án|new project|create project/i })
+        .first();
+      await menuItem.click({ timeout: 4_000 });
+    } else {
+      throw new Error('Không tìm thấy nút "Thêm dự án mới" / "New project" trên thanh bên ChatGPT.');
+    }
+  }
+
+  const inputSelector =
+    'input#chatgpt-project-name, input[name="project-name"], div[role="dialog"] input[type="text"]';
+  const nameInput = page.locator(inputSelector).first();
+  await nameInput.waitFor({ state: 'visible', timeout: 8_000 });
+  await nameInput.fill(targetName);
+  await sleep(400);
+
+  const dialog = page
+    .locator(
+      'div[role="dialog"]:has(input#chatgpt-project-name), div[role="dialog"]:has(input[name="project-name"]), div[role="dialog"]'
+    )
+    .last();
+  const submitBtn = dialog
+    .locator('button[type="submit"]:not([disabled])')
+    .first();
+
+  await submitBtn.waitFor({ state: 'visible', timeout: 5_000 });
+  await submitBtn.click({ timeout: 5_000 });
+
+  await page.waitForURL(/\/g\/g-p-[a-z0-9]+/i, { timeout: 15_000 });
+  await sleep(1500);
+
+  const createdUrl = normalizeChatGptProjectUrl(page.url());
+  if (!createdUrl) {
+    throw new Error(`Đã bấm Tạo dự án "${targetName}" nhưng URL chưa chuyển sang /g/g-p-... (hiện tại: ${page.url()}).`);
+  }
+
+  console.log(`[PROJECT AUTO-CREATE]: Đã tạo thành công Project "${targetName}" tại: ${createdUrl}`);
+  return createdUrl;
+}
+
+/**
+ * Tự động tìm kiếm dự án trên thanh sidebar của ChatGPT theo tên (`projectName` — mặc định trùng tên thư mục dự án Antigravity).
+ * - Nếu tìm thấy: điều hướng vào dự án đó và lưu URL `https://chatgpt.com/g/g-p-.../project` vào `SESSION_MAP.json`.
+ * - Nếu chưa có trên ChatGPT: tự động bấm "Thêm dự án mới", điền đúng tên dự án và tạo Project mới ngay lập tức!
+ *
+ * @param {import('playwright-core').Page} page
+ * @param {{ projectName?: string, projectUrl: string, currentTask: string, threads: Record<string, { url: string, updatedAt: string }> }} sessionMap
+ * @param {string} [projectName=DEFAULT_PROJECT_NAME]
+ * @returns {Promise<string>}
+ */
+export async function ensureProjectUrl(page, sessionMap, projectName = DEFAULT_PROJECT_NAME) {
+  const targetName = (projectName || DEFAULT_PROJECT_NAME || sessionMap?.projectName || 'AI-WORKSPACE').trim();
+  const cachedProjectUrl = normalizeChatGptProjectUrl(sessionMap?.projectUrl || '');
+  const cachedProjectName = (sessionMap?.projectName || '').trim();
+
+  if (
+    cachedProjectUrl &&
+    (!cachedProjectName || cachedProjectName.toLowerCase() === targetName.toLowerCase())
+  ) {
+    return cachedProjectUrl;
+  }
+
+  if (cachedProjectName && cachedProjectName.toLowerCase() !== targetName.toLowerCase()) {
+    console.log(
+      `[PROJECT RESOLUTION]: Tên dự án thay đổi ("${cachedProjectName}" -> "${targetName}"). Đang đồng bộ Project trên ChatGPT...`
+    );
+  } else {
+    console.log(`[PROJECT RESOLUTION]: Đang kiểm tra dự án "${targetName}" trên giao diện ChatGPT...`);
+  }
+
+  try {
+    if (!page.url().includes('chatgpt.com')) {
+      await page.goto(DEFAULT_PROJECT_URL, { waitUntil: 'domcontentloaded' });
+      await sleep(2500);
+    }
+
+    await ensureChatGptSidebarOpen(page);
+
+    // Bước 1: Tìm trong danh sách dự án đang hiển thị
+    let resolvedUrl = await findExistingProjectInSidebar(page, targetName);
+
+    // Bước 2: Nếu chưa thấy và có nút "Hiển thị thêm" trong mục Dự án, mở rộng rồi kiểm tra lại
+    if (!resolvedUrl && (await expandMoreProjectsIfAvailable(page))) {
+      await sleep(800);
+      resolvedUrl = await findExistingProjectInSidebar(page, targetName);
+    }
+
+    if (resolvedUrl) {
+      console.log(`[PROJECT RESOLUTION]: Đã tìm thấy dự án "${targetName}" tại: ${resolvedUrl}`);
+    } else {
+      // Bước 3: Chưa có dự án -> Tự động tạo mới trên ChatGPT trùng tên dự án Antigravity
+      resolvedUrl = await createChatGptProject(page, targetName);
+    }
+
+    if (resolvedUrl) {
+      if (!page.url().startsWith(resolvedUrl.replace(/\/project$/i, ''))) {
+        await page.goto(resolvedUrl, { waitUntil: 'domcontentloaded' });
         await sleep(2000);
       }
       if (sessionMap) {
-        sessionMap.projectUrl = foundHref;
+        sessionMap.projectUrl = resolvedUrl;
         sessionMap.projectName = targetName;
         saveSessionMap(sessionMap);
       }
-      return foundHref;
-    }
-
-    // Thử click vào phần tử trên sidebar có text hoặc aria-label chứa tên project
-    const projectLocator = page
-      .locator(
-        `nav a:has-text("${targetName}"), [role="navigation"] a:has-text("${targetName}"), a[aria-label*="${targetName}" i]`
-      )
-      .first();
-    if (await projectLocator.isVisible().catch(() => false)) {
-      console.log(`[PROJECT RESOLUTION]: Click vào link dự án "${targetName}" trên sidebar...`);
-      await projectLocator.click();
-      await page.waitForURL(/\/g\/g-p-/i, { timeout: 10_000 }).catch(() => {});
-      await sleep(1500);
-      const newUrl = page.url();
-      if (/\/g\/g-p-/i.test(newUrl)) {
-        if (sessionMap) {
-          sessionMap.projectUrl = newUrl;
-          sessionMap.projectName = targetName;
-          saveSessionMap(sessionMap);
-        }
-        return newUrl;
-      }
+      return resolvedUrl;
     }
   } catch (err) {
-    console.log(`[PROJECT RESOLUTION NOTE]: Không thể tìm dự án: ${err.message}`);
+    console.warn(`[PROJECT RESOLUTION WARNING]: Không thể tìm/tạo dự án "${targetName}": ${err.message}`);
   }
 
-  return sessionMap?.projectUrl || DEFAULT_PROJECT_URL;
+  return normalizeChatGptProjectUrl(sessionMap?.projectUrl || '') || DEFAULT_PROJECT_URL;
 }
 
 const resolveProjectUrl = ensureProjectUrl;
@@ -1090,7 +1550,7 @@ const resolveProjectUrl = ensureProjectUrl;
  *
  * QUY TẮC QUAN TRỌNG: Khi effectiveNewThread === true, TUYỆT ĐỐI KHÔNG bấm nút "Trò chuyện mới" (a[href="/"])
  * ở góc trái vì sẽ đẩy chat ra ngoài Project. Thay vào đó, gọi await page.goto(sessionMap.projectUrl)
- * và gõ thẳng vào ô composer ở giữa màn hình của Project AI-WORKSPACE.
+ * và gõ thẳng vào ô composer ở giữa màn hình của Project.
  *
  * @param {import('playwright-core').Page} page
  * @param {{ existingThreadUrl: string, isNewThread: boolean, projectUrl: string, model: string, projectName?: string, sessionMap?: any }} options
@@ -1100,12 +1560,14 @@ async function prepareTaskThread(
   page,
   { existingThreadUrl, isNewThread, projectUrl, model, projectName, sessionMap }
 ) {
-  // 1. Đảm bảo projectUrl trỏ đúng vào Project ChatGPT (/g/g-p-...)
-  const targetProjectUrl = await ensureProjectUrl(
-    page,
-    sessionMap,
-    projectName || sessionMap?.projectName || DEFAULT_PROJECT_NAME
-  );
+  const desiredProjectName =
+    projectName || DEFAULT_PROJECT_NAME || sessionMap?.projectName || 'AI-WORKSPACE';
+
+  // 0. Đảm bảo đang ở chế độ Chat tiêu chuẩn (không kẹt ở Codex / Work)
+  await ensureChatGptMode(page);
+
+  // 1. Đảm bảo projectUrl trỏ đúng vào Project ChatGPT (/g/g-p-...) — tự tạo mới nếu chưa có
+  let targetProjectUrl = await ensureProjectUrl(page, sessionMap, desiredProjectName);
 
   const projectIdMatch = targetProjectUrl.match(/\/g\/(g-p-[a-z0-9]+)/i);
   const requiredProjectId = projectIdMatch ? projectIdMatch[1].toLowerCase() : '';
@@ -1148,12 +1610,25 @@ async function prepareTaskThread(
   }
 
   // 3. Khởi tạo luồng chat mới (effectiveNewThread === true):
-  // TUYỆT ĐỐI KHÔNG bấm nút "Trò chuyện mới" (a[href="/"]) vì sẽ đẩy chat ra ngoài Project.
-  // Thay vào đó: điều hướng thẳng vào Project URL (/g/g-p-.../project), ChatGPT sẽ hiển thị ô composer ở giữa
-  // và tự động tạo luồng chat mới nằm gọn trong Project khi gửi prompt!
   console.log(`[TASK THREAD]: Khởi tạo luồng chat mới trong Project: ${targetProjectUrl}`);
   await page.goto(targetProjectUrl, { waitUntil: 'domcontentloaded' });
   await sleep(2500);
+
+  // Tự phục hồi nếu Project cũ trên ChatGPT đã bị người dùng xóa tay (bị redirect ra khỏi /g/g-p-...)
+  if (requiredProjectId && !page.url().toLowerCase().includes(requiredProjectId)) {
+    console.warn(
+      `[DEAD PROJECT RECOVERY]: Project cũ (${requiredProjectId}) không còn tồn tại trên ChatGPT. Tự động tạo lại Project "${desiredProjectName}"...`
+    );
+    if (sessionMap) {
+      sessionMap.projectUrl = '';
+      saveSessionMap(sessionMap);
+    }
+    targetProjectUrl = await ensureProjectUrl(page, sessionMap, desiredProjectName);
+    if (!page.url().startsWith(targetProjectUrl.replace(/\/project$/i, ''))) {
+      await page.goto(targetProjectUrl, { waitUntil: 'domcontentloaded' });
+      await sleep(2500);
+    }
+  }
 
   return { previousConversationId, effectiveNewThread: true };
 }
@@ -1263,7 +1738,13 @@ async function tryInvokeGptMention(page, promptTextarea, selectedRoles) {
     await promptTextarea.click();
     await promptTextarea.evaluate((el) => {
       el.focus();
-      el.replaceChildren(document.createElement('p'));
+      const sel = window.getSelection();
+      if (sel) {
+        sel.selectAllChildren(el);
+      }
+      if (typeof document.execCommand === 'function') {
+        document.execCommand('delete', false);
+      }
     });
 
     for (const role of selectedRoles) {
@@ -1374,34 +1855,46 @@ async function fillPromptFast(promptTextarea, text) {
         '[app-mention-display-name], [app-mention-path], [data-appearance="inline-mention"]'
       ).length > 0;
 
-    const pEl = document.createElement('p');
-    const lines = rawText.split('\n');
-    for (let i = 0; i < lines.length; i += 1) {
-      if (i > 0) {
-        pEl.appendChild(document.createElement('br'));
-      }
-      pEl.appendChild(document.createTextNode(lines[i]));
-    }
-
-    if (hasMentionPills) {
-      el.appendChild(pEl);
-    } else {
-      el.replaceChildren(pEl);
-    }
-
     const sel = window.getSelection();
     if (sel) {
       sel.selectAllChildren(el);
-      sel.collapseToEnd();
+      if (hasMentionPills) {
+        sel.collapseToEnd();
+      }
     }
 
-    el.dispatchEvent(
-      new InputEvent('input', {
+    const payload = hasMentionPills ? ` \n\n${rawText}` : String(rawText);
+
+    // Dán qua ClipboardEvent('paste') để cập nhật trực tiếp EditorState nội bộ của ProseMirror,
+    // giữ nguyên @Plugin pill, xuống dòng (\n) và bật ngay nút Gửi (disabled=false).
+    let pasted = false;
+    if (typeof DataTransfer !== 'undefined' && typeof ClipboardEvent !== 'undefined') {
+      const dt = new DataTransfer();
+      dt.setData('text/plain', payload);
+      const pasteEvent = new ClipboardEvent('paste', {
         bubbles: true,
         cancelable: true,
-        inputType: 'insertText',
-      })
-    );
+        clipboardData: dt,
+      });
+      el.dispatchEvent(pasteEvent);
+      pasted = (el.innerText || '').length >= Math.min(20, rawText.length);
+    }
+
+    if (!pasted && typeof document.execCommand === 'function') {
+      pasted = document.execCommand('insertText', false, payload);
+    }
+
+    if (!pasted) {
+      el.textContent = payload;
+      el.dispatchEvent(
+        new InputEvent('input', {
+          bubbles: true,
+          cancelable: true,
+          inputType: 'insertText',
+          data: payload,
+        })
+      );
+    }
   }, text);
 }
 
@@ -1428,13 +1921,13 @@ export async function setThinkingEffort(page, mode = 'plan', explicitEffort = ''
       ? /(?:^|\s|\n)(Chuẩn|Trung bình|Vừa|Standard|Medium)(?:$|\s|\n)/i
       : /(?:^|\s|\n)(Cao|High)(?:$|\s|\n)/i;
   const anyEffortButtonRegex =
-    /(?:^|\s|\n)(Cao|Chuẩn|Trung bình|Vừa|Thấp|High|Standard|Medium|Low)(?:$|\s|\n)/i;
+    /(Cao|Chuẩn|Trung bình|Vừa|Thấp|Nhẹ nhàng|Nhanh|Chuyên sâu|Không suy luận|Max|Ultra|High|Standard|Medium|Low|GPT-)/i;
 
   let menuOpened = false;
   try {
     const reasoningButton = page
       .locator(
-        'button[aria-label*="mô hình" i], button[aria-label*="model" i], button[aria-label*="suy luận" i], button[aria-label*="reasoning" i], button[aria-label*="thinking" i], button[aria-label*="effort" i], form button, [data-testid*="composer"] button'
+        'button[aria-label*="Chọn mô hình" i]:visible, button[aria-label*="Select model" i]:visible, button[aria-label*="mô hình" i]:visible, button[aria-label*="model" i]:visible, button[aria-label*="suy luận" i]:visible, button[aria-label*="reasoning" i]:visible, button[aria-label*="thinking" i]:visible, button[aria-label*="effort" i]:visible, form button:visible, [data-testid*="composer"] button:visible'
       )
       .filter({
         hasText: anyEffortButtonRegex,
@@ -1447,13 +1940,82 @@ export async function setThinkingEffort(page, mode = 'plan', explicitEffort = ''
     }
 
     const buttonText = (await reasoningButton.innerText().catch(() => '')).trim();
-    if (targetLabelRegex.test(buttonText)) {
+    const activeEffortHeader = buttonText.split(/\r?\n/).slice(0, 2).join('\n');
+    if (targetLabelRegex.test(activeEffortHeader)) {
       return;
     }
 
     await reasoningButton.click({ timeout: 5_000 });
     menuOpened = true;
+    await sleep(350);
 
+    // 1. Giao diện GPT-6.1 Sol mới: thanh trượt [role="slider"] (VD trên Sol: 0=Nhẹ nhàng, 1=Vừa, 2=Cao, 3=Chuyên sâu, 4=Max)
+    const slider = page
+      .locator(
+        '[role="menu"][data-state="open"] [role="slider"], [role="menuitem"][aria-label*="Năng lượng" i] [role="slider"], [role="menuitem"][aria-label*="Effort" i] [role="slider"], [role="menuitem"][aria-label*="Thinking" i] [role="slider"]'
+      )
+      .first();
+    if (await slider.isVisible().catch(() => false)) {
+      const curVal = Number(await slider.getAttribute('aria-valuenow').catch(() => 'NaN'));
+      const minVal = Number((await slider.getAttribute('aria-valuemin').catch(() => '0')) || '0');
+      const maxVal = Number((await slider.getAttribute('aria-valuemax').catch(() => '4')) || '4');
+      if (!Number.isNaN(curVal) && maxVal > minVal) {
+        const headerItem = page
+          .locator('[role="menu"][data-state="open"] [role="menuitem"]')
+          .first();
+        await slider.focus();
+        await sleep(80);
+
+        // Đưa về mốc nhỏ nhất rồi dò từng nấc theo nhãn thực tế ("Vừa"/"Standard" hoặc "Cao"/"High")
+        for (let i = curVal; i > minVal; i -= 1) {
+          await page.keyboard.press('ArrowLeft');
+          await sleep(60);
+        }
+
+        let matchedByLabel = false;
+        let chosenVal = minVal;
+        for (let v = minVal; v <= maxVal; v += 1) {
+          await sleep(100);
+          const liveHeader = (await headerItem.innerText().catch(() => '')).trim();
+          if (targetLabelRegex.test(liveHeader)) {
+            matchedByLabel = true;
+            chosenVal = v;
+            break;
+          }
+          if (v < maxVal) {
+            await page.keyboard.press('ArrowRight');
+          }
+        }
+
+        // Fallback theo nấc chuẩn nếu ngôn ngữ giao diện khác Tiếng Việt / Tiếng Anh
+        if (!matchedByLabel) {
+          const fallbackVal =
+            targetEffort === 'standard'
+              ? Math.min(minVal + 1, maxVal)
+              : Math.min(minVal + 2, maxVal);
+          const afterScanVal = Number(
+            await slider.getAttribute('aria-valuenow').catch(() => String(maxVal))
+          );
+          const delta = fallbackVal - (Number.isNaN(afterScanVal) ? maxVal : afterScanVal);
+          const key = delta > 0 ? 'ArrowRight' : 'ArrowLeft';
+          for (let step = 0; step < Math.abs(delta); step += 1) {
+            await page.keyboard.press(key);
+            await sleep(70);
+          }
+          chosenVal = fallbackVal;
+        }
+
+        console.log(
+          `[THINKING EFFORT]: Đã gạt thanh suy luận sang "${targetEffort}" (nấc ${chosenVal}/${maxVal}).`
+        );
+        await page.keyboard.press('Escape').catch(() => {});
+        menuOpened = false;
+        await sleep(250);
+        return;
+      }
+    }
+
+    // 2. Giao diện menu danh sách cổ điển ([role="menuitem"] / [role="menuitemradio"])
     const menuItems = page.locator(
       '[role="menuitem"], [role="menuitemradio"], [role="option"]'
     );
@@ -1720,24 +2282,48 @@ export async function attachReviewBundle(page, bundlePath, timeoutMs = 15_000) {
  */
 async function getAssistantState(page) {
   return page.evaluate(() => {
-    const userRoots = Array.from(
+    const legacyUserRoots = Array.from(
       document.querySelectorAll(
         '[data-message-author-role="user"], [class*="bg-user-message"], [data-markdown-text-tone="user-message"], [class*="rich-text-user-turn"]'
       )
     );
+    const convRoleUsers = Array.from(
+      document.querySelectorAll('[data-conversation-role="user"]')
+    );
+    const userCount = Math.max(legacyUserRoots.length, convRoleUsers.length);
 
-    const assistantTurns = Array.from(
+    const legacyAssistantTurns = Array.from(
       document.querySelectorAll(
         '[data-message-author-role="assistant"], [data-dil-response], [class*="DilResponseRoot"], article[data-turn="assistant"]'
       )
     );
+    const convRoleAssistants = Array.from(
+      document.querySelectorAll('[data-conversation-role="assistant"]')
+    );
 
-    let chosen = null;
+    let count = 0;
     let lastText = '';
 
-    if (assistantTurns.length > 0) {
-      chosen = assistantTurns[assistantTurns.length - 1];
+    if (legacyAssistantTurns.length >= convRoleAssistants.length && legacyAssistantTurns.length > 0) {
+      count = legacyAssistantTurns.length;
+      const chosen = legacyAssistantTurns[legacyAssistantTurns.length - 1];
       lastText = (chosen.innerText || '').trim();
+    } else if (convRoleAssistants.length > 0) {
+      count = convRoleAssistants.length;
+      const lastHeading = convRoleAssistants[convRoleAssistants.length - 1];
+      const turnContainer =
+        lastHeading.closest(
+          '[data-local-conversation-final-assistant], [data-content-search-unit-key*=":assistant"]'
+        ) ||
+        lastHeading.parentElement?.parentElement ||
+        lastHeading.parentElement;
+      if (turnContainer) {
+        // QUAN TRỌNG: Đọc trực tiếp turnContainer.innerText trên DOM đang gắn kết (KHÔNG dùng cloneNode,
+        // vì cloneNode tách khỏi DOM làm Chromium gộp mất toàn bộ ký tự xuống dòng \n).
+        lastText = (turnContainer.innerText || '')
+          .replace(/^\s*(?:ChatGPT|Assistant)\s+(?:đã nói|said)\s*:\s*/i, '')
+          .trim();
+      }
     } else {
       const fallbackNodes = Array.from(
         document.querySelectorAll('[class*="MarkdownRoot"]')
@@ -1750,14 +2336,14 @@ async function getAssistantState(page) {
         );
       });
       if (fallbackNodes.length > 0) {
-        chosen = fallbackNodes[fallbackNodes.length - 1];
-        lastText = (chosen.innerText || '').trim();
+        count = fallbackNodes.length;
+        lastText = (fallbackNodes[fallbackNodes.length - 1].innerText || '').trim();
       }
     }
 
     return {
-      userCount: userRoots.length,
-      count: assistantTurns.length > 0 ? assistantTurns.length : (chosen ? 1 : 0),
+      userCount,
+      count,
       lastText,
     };
   });
@@ -2005,8 +2591,10 @@ export async function connectProviderPage(
   const context =
     contexts.length > 0 ? contexts[0] : await browser.newContext();
   const page = await context.newPage();
+  // Gemini: mở trang chủ nhẹ; prepareGeminiThread() sẽ điều hướng đúng luồng của Task/Gem sau đó
+  // (tránh tải lại luồng cũ dài hàng trăm nghìn ký tự chỉ để rời đi ngay).
   const targetUrl = isGemini
-    ? sessionMap.geminiThreadUrl || DEFAULT_GEMINI_URL
+    ? DEFAULT_GEMINI_URL
     : sessionMap.projectUrl || DEFAULT_PROJECT_URL;
 
   await page.goto(targetUrl, { waitUntil: 'domcontentloaded' });
@@ -2014,15 +2602,131 @@ export async function connectProviderPage(
 }
 
 /**
+ * Ghi (upsert) luồng Gemini của một giai đoạn vào `sessionMap.geminiThreads` và lưu `SESSION_MAP.json`.
+ * `geminiThreadUrl` (legacy) chỉ được cập nhật làm con trỏ "luồng dùng gần nhất".
+ *
+ * @param {object} sessionMap
+ * @param {string} threadKey
+ * @param {string} taskId
+ * @param {string} url
+ * @param {number} rounds
+ * @returns {boolean} `true` nếu URL là một hội thoại Gemini hợp lệ và đã được lưu.
+ */
+export function recordGeminiThread(sessionMap, threadKey, taskId, url, rounds) {
+  if (!sessionMap || !threadKey || !extractGeminiConversationId(url)) {
+    return false;
+  }
+  if (!sessionMap.geminiThreads || typeof sessionMap.geminiThreads !== 'object') {
+    sessionMap.geminiThreads = {};
+  }
+  sessionMap.geminiThreads[threadKey] = {
+    url,
+    rounds,
+    updatedAt: new Date().toISOString(),
+  };
+  sessionMap.geminiThreadUrl = url;
+  if (taskId) {
+    sessionMap.currentTask = taskId;
+  }
+  saveSessionMap(sessionMap);
+  return true;
+}
+
+/**
+ * Điều hướng tab Gemini tới đúng luồng của Task & giai đoạn hiện tại (Per-Task Thread Rotation cho Gemini):
+ * - Có URL trong `geminiThreads[threadKey]` và không có `--new-thread` -> mở lại đúng hội thoại cũ.
+ *   Nếu hội thoại không còn tồn tại (Gemini chuyển hướng về trang chủ) -> tự động coi là luồng mới.
+ * - Luồng mới -> mở `geminiGemUrl` (Gem "AI-WORKSPACE Mentor") nếu có cấu hình, ngược lại mở trang chủ Gemini.
+ *
+ * @param {import('playwright-core').Page} page
+ * @param {{ existingThreadUrl?: string, isNewThread: boolean, gemUrl?: string }} options
+ * @returns {Promise<{ effectiveNewThread: boolean, previousConversationId: string, landingUrl: string }>}
+ */
+export async function prepareGeminiThread(page, { existingThreadUrl = '', isNewThread, gemUrl = '' }) {
+  const expectedId = extractGeminiConversationId(existingThreadUrl);
+
+  if (!isNewThread && expectedId) {
+    console.log(`[GEMINI THREAD]: Tiếp tục luồng hiện có của giai đoạn này: ${existingThreadUrl}`);
+    await page.goto(existingThreadUrl, { waitUntil: 'domcontentloaded' });
+    await sleep(2500);
+    const landedId = extractGeminiConversationId(page.url());
+    if (landedId === expectedId) {
+      return { effectiveNewThread: false, previousConversationId: landedId, landingUrl: page.url() };
+    }
+    console.warn(
+      `[GEMINI THREAD]: Không mở lại được luồng cũ (đang ở ${page.url()}), chuyển sang mở luồng mới kèm BOOTSTRAP.`
+    );
+  }
+
+  const targetUrl = gemUrl || DEFAULT_GEMINI_URL;
+  console.log(
+    gemUrl
+      ? `[GEMINI THREAD]: Mở đoạn chat mới bên trong Gem: ${gemUrl}`
+      : `[GEMINI THREAD]: Mở đoạn chat Gemini mới tinh: ${DEFAULT_GEMINI_URL}`
+  );
+  await page.goto(targetUrl, { waitUntil: 'domcontentloaded' });
+  await sleep(2500);
+
+  if (gemUrl && !GEMINI_GEM_URL_REGEX.test(page.url())) {
+    console.warn(
+      `[GEMINI GEM]: Không vào được Gem (đang ở ${page.url()}). Kiểm tra lại "geminiGemUrl" trong .agents/config.json — tạm dùng Gemini thường.`
+    );
+  }
+
+  return {
+    effectiveNewThread: true,
+    previousConversationId: extractGeminiConversationId(page.url()),
+    landingUrl: page.url(),
+  };
+}
+
+/**
+ * Chờ URL Gemini chuyển sang dạng hội thoại (`/app/<id>` hoặc `/gem/<gemId>/<id>`) sau khi gửi prompt.
+ * Với luồng mới, bắt buộc mã hội thoại phải khác mã trước khi gửi.
+ *
+ * @param {import('playwright-core').Page} page
+ * @param {string} previousConversationId
+ * @param {boolean} effectiveNewThread
+ * @param {number} [timeoutMs=30000]
+ * @returns {Promise<string>} URL hội thoại hoặc chuỗi rỗng nếu hết thời gian chờ.
+ */
+async function waitForGeminiConversationUrl(
+  page,
+  previousConversationId,
+  effectiveNewThread,
+  timeoutMs = 30_000
+) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const url = page.url();
+    const id = extractGeminiConversationId(url);
+    if (id && (!effectiveNewThread || id !== previousConversationId)) {
+      return url;
+    }
+    await sleep(500);
+  }
+  return '';
+}
+
+/**
  * Gửi prompt tới giao diện Gemini Web và lưu phản hồi vào `.agents/state/GEMINI_FEEDBACK.md`
- * kèm lưu `geminiThreadUrl` vào `SESSION_MAP.json`.
+ * kèm lưu URL luồng vào `SESSION_MAP.json` -> `geminiThreads[threadKey]` (xoay vòng theo Task & giai đoạn).
  *
  * @param {import('playwright-core').Page} page
  * @param {string} promptText
  * @param {object} sessionMap
+ * @param {{ threadKey?: string, taskId?: string, rounds?: number, previousConversationId?: string, effectiveNewThread?: boolean }} [threadOptions={}]
  * @returns {Promise<string>}
  */
-export async function askGemini(page, promptText, sessionMap = {}) {
+export async function askGemini(page, promptText, sessionMap = {}, threadOptions = {}) {
+  const {
+    threadKey = '',
+    taskId = '',
+    rounds = 1,
+    previousConversationId = extractGeminiConversationId(page.url()),
+    effectiveNewThread = false,
+    onPromptSubmitted = null,
+  } = threadOptions;
   const editorSelector = [
     'rich-textarea [role="textbox"][contenteditable="true"]',
     '[role="textbox"][contenteditable="true"]',
@@ -2037,20 +2741,44 @@ export async function askGemini(page, promptText, sessionMap = {}) {
 
   await editor.evaluate((el, text) => {
     el.focus();
-    el.textContent = '';
-    const inserted =
-      typeof document.execCommand === 'function'
-        ? document.execCommand('insertText', false, String(text))
-        : false;
-    if (!inserted || !el.textContent) {
-      el.textContent = String(text);
+    const raw = String(text);
+    const sel = window.getSelection();
+    if (sel) {
+      sel.selectAllChildren(el);
     }
+
+    // Ưu tiên dán nguyên khối qua ClipboardEvent('paste') để Quill (rich-textarea) không hiểu nhầm \n đầu tiên là phím Enter gửi tin nhắn
+    let pasted = false;
+    if (typeof DataTransfer !== 'undefined' && typeof ClipboardEvent !== 'undefined') {
+      el.textContent = '';
+      const dt = new DataTransfer();
+      dt.setData('text/plain', raw);
+      const pasteEvent = new ClipboardEvent('paste', {
+        bubbles: true,
+        cancelable: true,
+        clipboardData: dt,
+      });
+      el.dispatchEvent(pasteEvent);
+      pasted = (el.innerText || el.textContent || '').trim().length >= Math.min(20, raw.length);
+    }
+
+    if (!pasted) {
+      el.textContent = '';
+      const inserted =
+        typeof document.execCommand === 'function'
+          ? document.execCommand('insertText', false, raw)
+          : false;
+      if (!inserted || !el.textContent) {
+        el.textContent = raw;
+      }
+    }
+
     el.dispatchEvent(
       new InputEvent('input', {
         bubbles: true,
         cancelable: true,
         inputType: 'insertText',
-        data: String(text),
+        data: raw,
       })
     );
     el.dispatchEvent(new Event('change', { bubbles: true }));
@@ -2097,6 +2825,29 @@ export async function askGemini(page, promptText, sessionMap = {}) {
       break;
     }
     await sleep(500);
+  }
+
+  if (typeof onPromptSubmitted === 'function') {
+    onPromptSubmitted();
+  }
+
+  // Lưu sớm URL hội thoại vào geminiThreads ngay khi Gemini cấp /app/<id> (phòng khi phản hồi bị gián đoạn)
+  if (threadKey) {
+    const earlyUrl = await waitForGeminiConversationUrl(
+      page,
+      previousConversationId,
+      effectiveNewThread,
+      20_000
+    );
+    if (recordGeminiThread(sessionMap, threadKey, taskId, earlyUrl, rounds)) {
+      console.log(
+        `[SESSION_MAP]: Đã lưu luồng Gemini cho "${threadKey}" (rounds=${rounds}): ${earlyUrl}`
+      );
+    } else {
+      console.warn(
+        `[SESSION_MAP]: Chưa nhận được URL hội thoại Gemini cho "${threadKey}", sẽ thử lại sau khi có phản hồi.`
+      );
+    }
   }
 
   // Đợi nút Dừng / Stop biến mất và nội dung từ message-content / model-response ổn định trong 3000ms
@@ -2152,7 +2903,10 @@ export async function askGemini(page, promptText, sessionMap = {}) {
   fs.writeFileSync(GEMINI_FEEDBACK_FILE, `${lastText}\n`, 'utf8');
 
   const currentUrl = page.url();
-  if (currentUrl && currentUrl.includes('gemini.google.com')) {
+  if (threadKey) {
+    recordGeminiThread(sessionMap, threadKey, taskId, currentUrl, rounds);
+  } else if (currentUrl && currentUrl.includes('gemini.google.com')) {
+    // Tương thích ngược khi gọi askGemini() không kèm threadOptions
     sessionMap.geminiThreadUrl = currentUrl;
     saveSessionMap(sessionMap);
   }
@@ -2163,6 +2917,249 @@ export async function askGemini(page, promptText, sessionMap = {}) {
   return lastText;
 }
 
+/**
+ * Chuẩn bị kế hoạch prompt cho một provider (hàm thuần trên dữ liệu đã đọc, phục vụ cả --dry-run và chạy thật).
+ */
+function prepareProviderPromptPlan({
+  provider,
+  mode,
+  taskId,
+  threadKey,
+  sessionMap,
+  newThread,
+  planContent,
+  roadmapContent,
+  handoffContent,
+  errorSummary,
+  reviewSnapshot,
+  selectedRoles,
+  reviewResponseContent = '',
+  secondOpinionBlock = '',
+  effectiveNewThreadOverride = null,
+}) {
+  let isProviderNewThread;
+  if (typeof effectiveNewThreadOverride === 'boolean') {
+    isProviderNewThread = effectiveNewThreadOverride;
+  } else if (provider === 'gemini') {
+    const url = sessionMap.geminiThreads?.[threadKey]?.url || '';
+    isProviderNewThread = Boolean(newThread || !extractGeminiConversationId(url));
+  } else {
+    const entry =
+      sessionMap.threads?.[threadKey] ||
+      (mode === 'plan' ? sessionMap.threads?.[taskId] : null);
+    const url = entry && typeof entry.url === 'string' ? entry.url.trim() : '';
+    isProviderNewThread = Boolean(newThread || !url);
+  }
+
+  const usedRounds = getStageRounds(sessionMap, threadKey, provider);
+  const maxRounds = resolveMaxRounds(WORKFLOW_CONFIG.maxReviewRounds, provider, mode);
+  const nextRound = usedRounds + 1;
+  const ledger = loadLedger(REVIEW_LEDGER_FILE);
+  const openIssues = getOpenIssues(ledger, threadKey, provider);
+  const convergenceBlock =
+    mode !== 'rescue' ? buildConvergenceBlock(openIssues, nextRound) : '';
+
+  let decision = { kind: 'full', reason: mode };
+  let diffText = null;
+  if (mode === 'plan') {
+    const prevSnap = readSnapshot(snapshotPath(STATE_DIR, threadKey, provider));
+    diffText = prevSnap != null ? computeUnifiedDiff(prevSnap, planContent) : null;
+    decision = decidePlanPayload({
+      effectiveNewThread: isProviderNewThread,
+      usedRounds,
+      previousSnapshot: prevSnap,
+      planContent,
+      diffText,
+    });
+  }
+
+  const planBodyOverride =
+    mode === 'plan' && decision.kind === 'delta'
+      ? buildPlanDeltaBody(diffText, reviewResponseContent)
+      : '';
+  const bootstrapBlock = isProviderNewThread
+    ? buildBootstrapContext(
+        taskId,
+        roadmapContent,
+        handoffContent,
+        REVIEW_SCOPE,
+        provider === 'gemini' && mode !== 'plan' ? planContent : ''
+      )
+    : '';
+  const { prompt, positiveTestExitCode } = buildMentorPrompt(
+    mode,
+    planContent,
+    errorSummary,
+    bootstrapBlock,
+    reviewSnapshot,
+    selectedRoles,
+    {
+      planBodyOverride,
+      convergenceBlock,
+      secondOpinionBlock,
+      includeSeverityRules: mode !== 'rescue',
+    }
+  );
+
+  return {
+    provider,
+    isProviderNewThread,
+    usedRounds,
+    maxRounds,
+    nextRound,
+    openIssues,
+    decision,
+    prompt,
+    positiveTestExitCode,
+  };
+}
+
+/**
+ * Đánh giá phản hồi của một Mentor theo Severity Gate + Convergence Rule,
+ * ghi vào REVIEW_LEDGER.json + TECH_DEBT.md và trả về văn bản đã chuẩn hóa dòng STATUS.
+ */
+function evaluateAndRecordMentorResponse({
+  provider,
+  mode,
+  threadKey,
+  round,
+  responseText,
+  positiveTestExitCode = 0,
+  url = '',
+}) {
+  const rawStatus = detectApprovalStatus(responseText, mode);
+  if (mode === 'rescue') {
+    const normalizedText = [
+      'STATUS: REJECTED',
+      `<!-- RESCUE_MODE_GUIDANCE (${new Date().toISOString()}) -->`,
+      '',
+      responseText,
+      '',
+    ].join('\n');
+    return {
+      provider,
+      rawStatus: 'REJECTED',
+      status: 'REJECTED',
+      report: { structured: false, p0: [], p1: [], p2: [], statuses: {} },
+      warnings: [],
+      normalizedText,
+      url,
+    };
+  }
+
+  const report = parseSeverityReport(responseText);
+  const ledger = loadLedger(REVIEW_LEDGER_FILE);
+  const prevOpen = getOpenIssues(ledger, threadKey, provider);
+  const gate = applySeverityGate(rawStatus, report);
+  const warnings = [...gate.warnings];
+  const convViolations = detectConvergenceViolations(report, prevOpen, round);
+  if (convViolations.length > 0) {
+    warnings.push('CONVERGENCE_VIOLATION');
+  }
+  for (const w of warnings) {
+    console.warn(
+      `[POLICY WARNING - ${provider.toUpperCase()}]: ${w} — ${WARNING_TEXT[w] || w}`
+    );
+  }
+
+  let finalStatus = gate.status;
+  if (mode === 'review-code' && positiveTestExitCode !== 0) {
+    finalStatus = 'REJECTED';
+  }
+
+  const nonBlocking = [...report.p1, ...report.p2].map((item) => ({
+    ...item,
+    late: round >= 2,
+  }));
+  const addedDebt = appendTechDebt(TECH_DEBT_FILE, nonBlocking, {
+    threadKey,
+    provider,
+    round,
+  });
+  if (addedDebt > 0) {
+    console.log(
+      `[TECH_DEBT]: Đã ghi thêm ${addedDebt} mục P1/P2 không chặn từ ${provider} vào .agents/state/TECH_DEBT.md.`
+    );
+  }
+
+  appendLedgerRound(ledger, threadKey, provider, {
+    round,
+    status: finalStatus,
+    rawStatus,
+    p0: report.p0,
+    p1: report.p1,
+    p2: report.p2,
+    warnings,
+    at: new Date().toISOString(),
+  });
+  saveLedger(REVIEW_LEDGER_FILE, ledger);
+
+  const normalizedText = normalizeMentorFeedback(responseText, finalStatus, mode);
+  return {
+    provider,
+    rawStatus,
+    status: finalStatus,
+    report,
+    warnings,
+    normalizedText,
+    url,
+  };
+}
+
+function clearEscalationIfPresent(threadKey) {
+  if (!fs.existsSync(HANDOFF_FILE)) return;
+  const current = fs.readFileSync(HANDOFF_FILE, 'utf8');
+  if (hasEscalation(current, threadKey)) {
+    fs.writeFileSync(HANDOFF_FILE, removeEscalation(current, threadKey), 'utf8');
+    console.log(`[ESCALATION]: Đã xóa khối ESCALATION của "${threadKey}" khỏi HANDOFF.md.`);
+  }
+}
+
+function recordEscalationAndThrow({
+  taskId,
+  threadKey,
+  mode,
+  reason,
+  targetProviders,
+  sessionMap,
+}) {
+  const budget = checkRoundBudget(
+    sessionMap,
+    threadKey,
+    targetProviders,
+    WORKFLOW_CONFIG.maxReviewRounds,
+    mode
+  ).details;
+  const ledger = loadLedger(REVIEW_LEDGER_FILE);
+  const openIssues = {};
+  const lastStatus = {};
+  for (const p of ['chatgpt', 'gemini']) {
+    openIssues[p] = getOpenIssues(ledger, threadKey, p);
+    const rounds = ledger?.[threadKey]?.[p];
+    if (Array.isArray(rounds) && rounds.length > 0) {
+      lastStatus[p] = rounds[rounds.length - 1].status;
+    }
+  }
+  const block = renderEscalationBlock({
+    taskId,
+    threadKey,
+    reason,
+    budget,
+    openIssues,
+    lastStatus,
+  });
+  const currentHandoff = readFileSafe(HANDOFF_FILE);
+  fs.mkdirSync(STATE_DIR, { recursive: true });
+  fs.writeFileSync(
+    HANDOFF_FILE,
+    upsertEscalation(currentHandoff, threadKey, block),
+    'utf8'
+  );
+  throw new EscalationError(
+    `[ESCALATION - EXIT ${ESCALATION_EXIT_CODE}]: ${reason} — Đã ghi khối ESCALATION vào .agents/state/HANDOFF.md. Agent phải DỪNG lại chờ người quyết định.`
+  );
+}
+
 async function main() {
   const {
     mode,
@@ -2171,12 +3168,40 @@ async function main() {
     roleArg,
     effortArg,
     newThread,
+    dryRun,
+    resetRounds,
+    ensureProject,
     errorSummary,
     model,
     projectName,
     cdpUrl,
   } = parseArgs(process.argv.slice(2));
   const selectedRoles = resolveSpecialistRoles(roleArg, mode);
+  const dualPolicy = resolveDualMentorPolicy(WORKFLOW_CONFIG.dualMentorPolicy);
+  // Khi --provider both: chạy Gemini trước để đưa P0 của Gemini vào prompt ChatGPT (Second Opinion)
+  const targetProviders =
+    provider === 'both' ? ['gemini', 'chatgpt'] : [provider];
+
+  // Chế độ --ensure-project: kết nối Chrome (9222), tự tìm hoặc tạo mới Project trùng tên dự án Antigravity
+  if (ensureProject) {
+    const sessionMap = loadSessionMap();
+    const targetProjectName = (projectName || DEFAULT_PROJECT_NAME).trim();
+    const runtimeConfig = { ...WORKFLOW_CONFIG, cdpUrl };
+    let conn = null;
+    try {
+      conn = await connectProviderPage('chatgpt', runtimeConfig, sessionMap);
+      const resolvedUrl = await ensureProjectUrl(conn.page, sessionMap, targetProjectName);
+      if (!/^https:\/\/chatgpt\.com\/g\/g-p-[a-z0-9]+/i.test(resolvedUrl)) {
+        throw new Error(`Chưa xác nhận được URL Project hợp lệ cho "${targetProjectName}" (nhận được: ${resolvedUrl}).`);
+      }
+      console.log(`[PROJECT READY]: "${targetProjectName}" -> ${resolvedUrl}`);
+      return;
+    } finally {
+      if (conn?.browser) {
+        await conn.browser.close().catch(() => {});
+      }
+    }
+  }
 
   // 1. Đọc nội dung file .agents/state/CURRENT_PLAN.md, ROADMAP.md, HANDOFF.md và SESSION_MAP.json
   if (!fs.existsSync(PLAN_FILE)) {
@@ -2189,6 +3214,7 @@ async function main() {
 
   const roadmapContent = readFileSafe(ROADMAP_FILE);
   const handoffContent = readFileSafe(HANDOFF_FILE);
+  const reviewResponseContent = readFileSafe(REVIEW_RESPONSE_FILE).trim();
   const sessionMap = loadSessionMap();
 
   const taskId = resolveCurrentTaskId(
@@ -2198,56 +3224,124 @@ async function main() {
     sessionMap
   );
   const threadKey = getThreadKey(taskId, mode);
-  const existingThreadEntry =
-    sessionMap.threads[threadKey] ||
-    (mode === 'plan' ? sessionMap.threads[taskId] : null);
-  const existingThreadUrl =
-    existingThreadEntry && typeof existingThreadEntry.url === 'string'
-      ? existingThreadEntry.url.trim()
-      : '';
-  // Nếu task_id và mode chưa có URL trong SESSION_MAP.json, tự động coi isNewThread = true ngay cả khi không truyền --new-thread
-  const isNewThread = Boolean(newThread || !existingThreadUrl);
 
-  const currentRounds =
-    !isNewThread &&
-    existingThreadEntry &&
-    typeof existingThreadEntry.rounds === 'number'
-      ? existingThreadEntry.rounds
-      : 0;
-  if (
-    (provider === 'chatgpt' || provider === 'both') &&
-    currentRounds >= MAX_ROUNDS_PER_STAGE
-  ) {
-    throw new Error(
-      `[GIỚI HẠN VÒNG REVIEW]: Đã đạt giới hạn cứng tối đa ${MAX_ROUNDS_PER_STAGE} vòng review cho giai đoạn "${threadKey}". Không tự động gửi thêm.`
+  // Xử lý --reset-rounds (chỉ dành cho người; có ghi vết vào stageRounds[threadKey].resets)
+  if (resetRounds) {
+    const resetList = provider === 'both' ? ['chatgpt', 'gemini'] : [provider];
+    resetStageRounds(sessionMap, threadKey, resetList);
+    saveSessionMap(sessionMap);
+    clearEscalationIfPresent(threadKey);
+    console.log(
+      `[RESET ROUNDS]: Đã đặt lại bộ đếm vòng của "${threadKey}" cho [${resetList.join(', ')}] và xóa khối ESCALATION (nếu có).`
     );
+    return;
   }
-  const nextRound = currentRounds + 1;
 
   let reviewSnapshot = null;
-  const uniqueBundleName = `review_bundle_${Date.now()}_${process.pid}.txt`;
-  const tempBundlePath = path.join(os.tmpdir(), uniqueBundleName);
   if (mode !== 'plan') {
     reviewSnapshot = collectReviewSnapshot(REPO_ROOT);
+  }
+
+  // Bước 0: Chế độ --dry-run (kiểm chứng toàn bộ quyết định mà KHÔNG chạm Chrome và KHÔNG ghi .agents/state/*)
+  const budgetCheck = checkRoundBudget(
+    sessionMap,
+    threadKey,
+    targetProviders,
+    WORKFLOW_CONFIG.maxReviewRounds,
+    mode
+  );
+  const initialPlans = {};
+  for (const p of targetProviders) {
+    initialPlans[p] = prepareProviderPromptPlan({
+      provider: p,
+      mode,
+      taskId,
+      threadKey,
+      sessionMap,
+      newThread,
+      planContent,
+      roadmapContent,
+      handoffContent,
+      errorSummary,
+      reviewSnapshot,
+      selectedRoles,
+      reviewResponseContent,
+    });
+  }
+
+  if (dryRun) {
+    for (const p of targetProviders) {
+      const plan = initialPlans[p];
+      const outFile = path.join(
+        os.tmpdir(),
+        `dry_run_prompt_${threadKey}_${p}_${Date.now()}_${process.pid}.txt`
+      );
+      fs.writeFileSync(outFile, plan.prompt, 'utf8');
+      console.log(
+        `[DRY-RUN]: provider=${p} | stage=${threadKey} | round=${plan.nextRound}/${plan.maxRounds} (used=${plan.usedRounds}) | thread=${plan.isProviderNewThread ? 'NEW' : 'CONTINUE'} | payload=${plan.decision.kind.toUpperCase()} (${plan.decision.reason}) | chars=${plan.prompt.length} | promptFile=${outFile}`
+      );
+    }
+    if (!budgetCheck.ok) {
+      console.error(
+        `[DRY-RUN][ESCALATION]: Đã hết ngân sách vòng cho [${budgetCheck.exhausted.join(', ')}] ở giai đoạn "${threadKey}". (Exit code ${ESCALATION_EXIT_CODE})`
+      );
+      process.exitCode = ESCALATION_EXIT_CODE;
+      return;
+    }
+    const unchangedProviders = targetProviders.filter(
+      (p) => mode === 'plan' && initialPlans[p].decision.kind === 'unchanged'
+    );
+    if (unchangedProviders.length > 0) {
+      console.error(
+        `[DRY-RUN][UNCHANGED]: CURRENT_PLAN.md không đổi so với snapshot đã gửi cho [${unchangedProviders.join(', ')}]. (Exit code 1)`
+      );
+      process.exitCode = 1;
+      return;
+    }
+    return;
+  }
+
+  // Bước 1 & 5: Kiểm tra ngân sách vòng TRƯỚC Pre-Send Reset (không làm mất STATUS: APPROVED đang có)
+  if (!budgetCheck.ok) {
+    const exhaustedDesc = budgetCheck.details
+      .filter((d) => d.used >= d.max)
+      .map((d) => `${d.provider} (${d.used}/${d.max})`)
+      .join(', ');
+    recordEscalationAndThrow({
+      taskId,
+      threadKey,
+      mode,
+      reason: `Đã đạt giới hạn vòng review cho giai đoạn "${threadKey}": ${exhaustedDesc}`,
+      targetProviders,
+      sessionMap,
+    });
+  }
+
+  // Bước 4: Chặn gửi lại CURRENT_PLAN.md không thay đổi (TRƯỚC Pre-Send Reset, không đốt vòng)
+  if (mode === 'plan') {
+    const unchanged = targetProviders.filter(
+      (p) => initialPlans[p].decision.kind === 'unchanged'
+    );
+    if (unchanged.length > 0) {
+      throw new Error(
+        `[DELTA REVIEW]: CURRENT_PLAN.md không thay đổi so với lần gửi gần nhất cho [${unchanged.join(', ')}] ở "${threadKey}". Hãy cập nhật kế hoạch trước khi gửi lại (không tốn vòng review).`
+      );
+    }
+  }
+
+  const uniqueBundleName = `review_bundle_${Date.now()}_${process.pid}.txt`;
+  const tempBundlePath = path.join(os.tmpdir(), uniqueBundleName);
+  if (mode !== 'plan' && reviewSnapshot) {
     fs.writeFileSync(tempBundlePath, reviewSnapshot.fullBundleText, 'utf8');
   }
 
-  const bootstrapBlock = isNewThread
-    ? buildBootstrapContext(taskId, roadmapContent, handoffContent, REVIEW_SCOPE)
-    : '';
-  let { prompt: reviewPrompt, positiveTestExitCode } = buildMentorPrompt(
-    mode,
-    planContent,
-    errorSummary,
-    bootstrapBlock,
-    reviewSnapshot,
-    selectedRoles
-  );
-
   const roleSummary = selectedRoles.map((r) => `${r.key} (${r.name})`).join(', ');
-  console.log(
-    `[PAYLOAD INFO]: Provider="${provider}" | Giai đoạn "${threadKey}" (Vòng ${nextRound}/${MAX_ROUNDS_PER_STAGE}) | Chuyên gia: [${roleSummary}] | Kích thước prompt: ${reviewPrompt.length} ký tự.`
-  );
+  for (const p of targetProviders) {
+    const plan = initialPlans[p];
+    console.log(
+      `[PAYLOAD INFO]: Provider="${p}" | Giai đoạn "${threadKey}" (Vòng ${plan.nextRound}/${plan.maxRounds}) | Chế độ gửi: ${plan.decision.kind.toUpperCase()} | Chuyên gia: [${roleSummary}] | Kích thước prompt: ${plan.prompt.length} ký tự.`
+    );
+  }
 
   // Pre-Send Reset: Vô hiệu hóa trạng thái APPROVED cũ trước khi kết nối Chrome
   fs.mkdirSync(STATE_DIR, { recursive: true });
@@ -2300,19 +3394,159 @@ async function main() {
 
   let chatgptBrowser = null;
   let geminiBrowser = null;
+  let geminiResult = null;
 
   try {
+    // 2A. Nếu chạy Gemini (độc lập hoặc chạy trước trong --provider both để lấy Second Opinion)
+    if (provider === 'gemini' || provider === 'both') {
+      try {
+        const geminiConn = await connectProviderPage(
+          'gemini',
+          runtimeConfig,
+          sessionMap,
+          chatgptBrowser
+        );
+        geminiBrowser = geminiConn.browser;
+
+        const geminiExistingEntry = sessionMap.geminiThreads?.[threadKey] || null;
+        const geminiExistingUrl =
+          geminiExistingEntry && typeof geminiExistingEntry.url === 'string'
+            ? geminiExistingEntry.url.trim()
+            : '';
+        const geminiIsNewThread = Boolean(
+          newThread || !extractGeminiConversationId(geminiExistingUrl)
+        );
+        const gemUrl = normalizeGeminiGemUrl(runtimeConfig.geminiGemUrl);
+        if (runtimeConfig.geminiGemUrl && !gemUrl) {
+          console.warn(
+            `[GEMINI GEM]: "geminiGemUrl" trong .agents/config.json không hợp lệ (cần dạng https://gemini.google.com/gem/<id>), bỏ qua.`
+          );
+        }
+
+        const geminiThread = await prepareGeminiThread(geminiConn.page, {
+          existingThreadUrl: geminiExistingUrl,
+          isNewThread: geminiIsNewThread,
+          gemUrl,
+        });
+        const geminiPlan = prepareProviderPromptPlan({
+          provider: 'gemini',
+          mode,
+          taskId,
+          threadKey,
+          sessionMap,
+          newThread,
+          planContent,
+          roadmapContent,
+          handoffContent,
+          errorSummary,
+          reviewSnapshot,
+          selectedRoles,
+          reviewResponseContent,
+          effectiveNewThreadOverride: geminiThread.effectiveNewThread,
+        });
+        let geminiStageRound = geminiPlan.nextRound;
+        console.log(
+          `[GEMINI PAYLOAD]: Giai đoạn "${threadKey}" | ${geminiThread.effectiveNewThread ? 'Luồng MỚI (kèm BOOTSTRAP)' : `Tiếp tục luồng cũ`} | Vòng ${geminiPlan.nextRound}/${geminiPlan.maxRounds} | Payload=${geminiPlan.decision.kind.toUpperCase()}${gemUrl ? ' | Gem: ' + gemUrl : ''} | Kích thước prompt: ${geminiPlan.prompt.length} ký tự.`
+        );
+
+        const geminiResponseText = await askGemini(
+          geminiConn.page,
+          geminiPlan.prompt,
+          sessionMap,
+          {
+            threadKey,
+            taskId,
+            rounds: geminiPlan.nextRound,
+            previousConversationId: geminiThread.previousConversationId,
+            effectiveNewThread: geminiThread.effectiveNewThread,
+            onPromptSubmitted: () => {
+              geminiStageRound = incrementStageRound(
+                sessionMap,
+                threadKey,
+                'gemini'
+              );
+              saveSessionMap(sessionMap);
+              if (mode === 'plan') {
+                writeSnapshot(
+                  snapshotPath(STATE_DIR, threadKey, 'gemini'),
+                  planContent
+                );
+              }
+            },
+          }
+        );
+
+        geminiResult = evaluateAndRecordMentorResponse({
+          provider: 'gemini',
+          mode,
+          threadKey,
+          round: geminiStageRound,
+          responseText: geminiResponseText,
+          positiveTestExitCode: geminiPlan.positiveTestExitCode,
+          url: geminiConn.page.url(),
+        });
+        fs.writeFileSync(
+          GEMINI_FEEDBACK_FILE,
+          geminiResult.normalizedText,
+          'utf8'
+        );
+        console.log(`GEMINI_STATUS: ${geminiResult.status}`);
+
+        if (provider === 'gemini') {
+          if (geminiResult.status === 'APPROVED') {
+            clearEscalationIfPresent(threadKey);
+          } else if (geminiStageRound >= geminiPlan.maxRounds) {
+            recordEscalationAndThrow({
+              taskId,
+              threadKey,
+              mode,
+              reason: `Gemini trả về REJECTED ở vòng cuối cùng (${geminiStageRound}/${geminiPlan.maxRounds}) của "${threadKey}"`,
+              targetProviders: ['gemini'],
+              sessionMap,
+            });
+          }
+        }
+      } catch (geminiErr) {
+        if (
+          provider === 'both' &&
+          dualPolicy === 'chatgpt-gate' &&
+          !(geminiErr instanceof EscalationError)
+        ) {
+          console.warn(
+            `[GEMINI ADVISORY WARNING]: Gemini gặp lỗi (${geminiErr.message}) — tiếp tục gửi ChatGPT vì dualMentorPolicy="chatgpt-gate".`
+          );
+          geminiResult = { unavailable: true, error: geminiErr.message };
+          fs.writeFileSync(
+            GEMINI_FEEDBACK_FILE,
+            `STATUS: UNAVAILABLE\n\nGemini không phản hồi được ở vòng này: ${geminiErr.message}\n`,
+            'utf8'
+          );
+        } else {
+          throw geminiErr;
+        }
+      }
+    }
+
+    // 2B. Chạy ChatGPT (cổng quyết định chính)
     if (provider === 'chatgpt' || provider === 'both') {
-      // 2. Kết nối vào trình duyệt Chrome đang mở qua connectProviderPage('chatgpt')
+      const existingThreadEntry =
+        sessionMap.threads[threadKey] ||
+        (mode === 'plan' ? sessionMap.threads[taskId] : null);
+      const existingThreadUrl =
+        existingThreadEntry && typeof existingThreadEntry.url === 'string'
+          ? existingThreadEntry.url.trim()
+          : '';
+      const isNewThread = Boolean(newThread || !existingThreadUrl);
+
       const conn = await connectProviderPage(
         'chatgpt',
         runtimeConfig,
-        sessionMap
+        sessionMap,
+        geminiBrowser
       );
       chatgptBrowser = conn.browser;
       const page = conn.page;
 
-      // 4. Điều hướng luồng chat theo Task và giai đoạn (Per-Task & Per-Stage Thread Rotation)
       const { previousConversationId, effectiveNewThread } =
         await prepareTaskThread(page, {
           existingThreadUrl,
@@ -2323,30 +3557,35 @@ async function main() {
           sessionMap,
         });
 
-      if (effectiveNewThread && !isNewThread) {
-        const effectiveBootstrap = buildBootstrapContext(
-          taskId,
-          roadmapContent,
-          handoffContent,
-          REVIEW_SCOPE
-        );
-        reviewPrompt = buildMentorPrompt(
-          mode,
-          planContent,
-          errorSummary,
-          effectiveBootstrap,
-          reviewSnapshot,
-          selectedRoles
-        ).prompt;
-      }
+      const secondOpinionBlock =
+        provider === 'both' && mode !== 'rescue'
+          ? buildSecondOpinionBlock(geminiResult)
+          : '';
+      const chatgptPlan = prepareProviderPromptPlan({
+        provider: 'chatgpt',
+        mode,
+        taskId,
+        threadKey,
+        sessionMap,
+        newThread,
+        planContent,
+        roadmapContent,
+        handoffContent,
+        errorSummary,
+        reviewSnapshot,
+        selectedRoles,
+        reviewResponseContent,
+        secondOpinionBlock,
+        effectiveNewThreadOverride: effectiveNewThread,
+      });
+      const reviewPrompt = chatgptPlan.prompt;
+      const positiveTestExitCode = chatgptPlan.positiveTestExitCode;
 
-      // 5. Đợi ô nhập prompt hiển thị và tự động điều chỉnh mức suy luận (Cao/High hoặc Chuẩn/Standard)
       const promptTextarea = page.locator(PROMPT_SELECTOR).first();
       await promptTextarea.waitFor({ state: 'visible', timeout: 60_000 });
 
       await setThinkingEffort(page, mode, effortArg);
 
-      // Chờ nếu đang có phản hồi chưa dừng từ trước
       const stopLocator = page.locator(STOP_BUTTON_SELECTOR);
       const waitStopStart = Date.now();
       while (Date.now() - waitStopStart < 20_000) {
@@ -2376,7 +3615,6 @@ async function main() {
       await fillPromptFast(promptTextarea, reviewPrompt);
       await page.keyboard.press('Space').catch(() => {});
 
-      // Nhấn nút gửi ([data-testid="send-button"] hoặc button[aria-label="Gửi"])
       const sendButton = page.locator(SEND_BUTTON_SELECTOR).first();
       const isSendVisible = await sendButton
         .waitFor({ state: 'visible', timeout: 8_000 })
@@ -2389,23 +3627,52 @@ async function main() {
         await promptTextarea.press('Enter');
       }
 
-      // Chờ tin nhắn người dùng mới xuất hiện trên giao diện để bảo đảm đã submit thành công
+      let submittedConfirmed = false;
       const submitStart = Date.now();
       while (Date.now() - submitStart < 15_000) {
         const state = await getAssistantState(page).catch(() => ({
           userCount: 0,
         }));
-        if (state.userCount > previousUserCount) {
+        const isGeneratingNow =
+          (await stopLocator.count().catch(() => 0)) > 0;
+        const remainingEditorLen = await promptTextarea
+          .evaluate((el) => (el.innerText || '').trim().length)
+          .catch(() => 999);
+        if (
+          state.userCount > previousUserCount ||
+          isGeneratingNow ||
+          remainingEditorLen === 0
+        ) {
+          submittedConfirmed = true;
           break;
         }
         if (await sendButton.isVisible().catch(() => false)) {
           await sendButton.click().catch(() => {});
+        } else {
+          await promptTextarea.press('Enter').catch(() => {});
         }
         await sleep(500);
       }
 
-      // 6. Sau khi gửi tin nhắn và URL trình duyệt chuyển sang dạng /c/[a-z0-9-]+ (hoặc /g/.../c/...),
-      // tự động lấy page.url() lưu vào SESSION_MAP.json cho task_id và mode đó
+      if (!submittedConfirmed) {
+        throw new Error(
+          'Không gửi được prompt trên giao diện ChatGPT sau 15s (nút Gửi chưa kích hoạt hoặc giao diện bị chặn).'
+        );
+      }
+
+      // Tăng bộ đếm stageRounds của ChatGPT ngay khi đã gửi thành công (không phụ thuộc --new-thread)
+      const chatgptStageRound = incrementStageRound(
+        sessionMap,
+        threadKey,
+        'chatgpt'
+      );
+      if (mode === 'plan') {
+        writeSnapshot(
+          snapshotPath(STATE_DIR, threadKey, 'chatgpt'),
+          planContent
+        );
+      }
+
       const activeThreadUrl = await waitForConversationUrl(
         page,
         previousConversationId,
@@ -2415,21 +3682,22 @@ async function main() {
       if (CONVERSATION_URL_REGEX.test(activeThreadUrl)) {
         sessionMap.threads[threadKey] = {
           url: activeThreadUrl,
-          rounds: nextRound,
+          rounds: chatgptStageRound,
           updatedAt: new Date().toISOString(),
         };
         sessionMap.threads[taskId] = {
           url: activeThreadUrl,
-          rounds: nextRound,
+          rounds: chatgptStageRound,
           updatedAt: new Date().toISOString(),
         };
-        saveSessionMap(sessionMap);
+      }
+      saveSessionMap(sessionMap);
+      if (CONVERSATION_URL_REGEX.test(activeThreadUrl)) {
         console.log(
-          `[SESSION_MAP]: Đã lưu đè URL luồng chat mới vào "${taskId}" và "${threadKey}" (rounds=${nextRound}): ${activeThreadUrl}`
+          `[SESSION_MAP]: Đã lưu URL luồng ChatGPT vào "${taskId}" và "${threadKey}" (stageRound=${chatgptStageRound}/${chatgptPlan.maxRounds}): ${activeThreadUrl}`
         );
       }
 
-      // 7. Đợi ChatGPT phản hồi xong (chờ nút stop-button biến mất và nội dung ổn định)
       const responseText = await waitForStableAssistantResponse(
         page,
         previousUserCount,
@@ -2438,38 +3706,54 @@ async function main() {
         mode
       );
 
-      // Cập nhật lại URL & timestamp cuối cùng vào SESSION_MAP.json sau khi hoàn tất phản hồi
       const finalUrl = page.url();
       sessionMap.currentTask = taskId;
       if (CONVERSATION_URL_REGEX.test(finalUrl)) {
         sessionMap.threads[threadKey] = {
           url: finalUrl,
-          rounds: nextRound,
+          rounds: chatgptStageRound,
           updatedAt: new Date().toISOString(),
         };
         sessionMap.threads[taskId] = {
           url: finalUrl,
-          rounds: nextRound,
+          rounds: chatgptStageRound,
           updatedAt: new Date().toISOString(),
         };
         saveSessionMap(sessionMap);
       }
 
-      // 8. Ghi kết quả theo chế độ chạy (`plan`, `review-code`, `rescue`)
       fs.mkdirSync(STATE_DIR, { recursive: true });
-      const status = detectApprovalStatus(responseText, mode);
+      const chatgptEval = evaluateAndRecordMentorResponse({
+        provider: 'chatgpt',
+        mode,
+        threadKey,
+        round: chatgptStageRound,
+        responseText,
+        positiveTestExitCode,
+        url: finalUrl,
+      });
+
+      let finalStatus = chatgptEval.status;
+      let advisorySuffix = '';
+      if (provider === 'both' && mode !== 'rescue') {
+        const dual = combineDualStatus(
+          chatgptEval.status,
+          geminiResult,
+          dualPolicy
+        );
+        finalStatus = dual.finalStatus;
+        advisorySuffix = renderAdvisorySection(geminiResult, dualPolicy);
+        console.log(
+          `[DUAL MENTOR]: ChatGPT=${chatgptEval.status} | Gemini=${dual.geminiStatus} -> ${dual.consensus} (policy=${dualPolicy}, final=${finalStatus})`
+        );
+      }
 
       if (mode === 'review-code') {
-        const cleanedBody = responseText
-          .replace(/^\s*CODE_STATUS\s*:\s*(APPROVED|REJECTED)\s*\r?\n?/i, '')
-          .trim();
-        const effectiveStatus =
-          status === 'APPROVED' && positiveTestExitCode === 0
-            ? 'APPROVED'
-            : 'REJECTED';
-        const normalizedCodeReview = `CODE_STATUS: ${effectiveStatus}\n\n${cleanedBody}\n`;
-        fs.writeFileSync(CODE_REVIEW_FILE, normalizedCodeReview, 'utf8');
-        if (effectiveStatus === 'APPROVED') {
+        const outputText =
+          normalizeMentorFeedback(responseText, finalStatus, 'review-code') +
+          advisorySuffix;
+        fs.writeFileSync(CODE_REVIEW_FILE, outputText, 'utf8');
+        if (finalStatus === 'APPROVED') {
           const latestLock = loadStateLock(REPO_ROOT);
           saveStateLock(
             {
@@ -2480,25 +3764,18 @@ async function main() {
             },
             REPO_ROOT
           );
+          clearEscalationIfPresent(threadKey);
         }
-        console.log(`CODE_STATUS: ${effectiveStatus}`);
+        console.log(`CODE_STATUS: ${finalStatus}`);
       } else if (mode === 'rescue') {
-        const normalizedRescue = [
-          'STATUS: REJECTED',
-          `<!-- RESCUE_MODE_GUIDANCE (${new Date().toISOString()}) -->`,
-          '',
-          responseText,
-          '',
-        ].join('\n');
-        fs.writeFileSync(FEEDBACK_FILE, normalizedRescue, 'utf8');
+        fs.writeFileSync(FEEDBACK_FILE, chatgptEval.normalizedText, 'utf8');
         console.log('RESCUE_GUIDANCE_SAVED');
       } else {
-        const cleanedBody = responseText
-          .replace(/^\s*STATUS\s*:\s*(APPROVED|REJECTED)\s*\r?\n?/i, '')
-          .trim();
-        const normalizedFeedback = `STATUS: ${status}\n\n${cleanedBody}\n`;
-        fs.writeFileSync(FEEDBACK_FILE, normalizedFeedback, 'utf8');
-        if (status === 'APPROVED') {
+        const outputText =
+          normalizeMentorFeedback(responseText, finalStatus, 'plan') +
+          advisorySuffix;
+        fs.writeFileSync(FEEDBACK_FILE, outputText, 'utf8');
+        if (finalStatus === 'APPROVED') {
           saveStateLock(
             {
               taskId,
@@ -2508,20 +3785,27 @@ async function main() {
             },
             REPO_ROOT
           );
+          clearEscalationIfPresent(threadKey);
         }
-        console.log(`STATUS: ${status}`);
+        console.log(`STATUS: ${finalStatus}`);
       }
-    }
 
-    if (provider === 'gemini' || provider === 'both') {
-      const geminiConn = await connectProviderPage(
-        'gemini',
-        runtimeConfig,
-        sessionMap,
-        chatgptBrowser
-      );
-      geminiBrowser = geminiConn.browser;
-      await askGemini(geminiConn.page, reviewPrompt, sessionMap);
+      if (
+        finalStatus === 'REJECTED' &&
+        chatgptStageRound >= chatgptPlan.maxRounds
+      ) {
+        recordEscalationAndThrow({
+          taskId,
+          threadKey,
+          mode,
+          reason:
+            mode === 'rescue'
+              ? `Đã dùng hết ${chatgptStageRound}/${chatgptPlan.maxRounds} lượt RESCUE (Circuit Breaker) cho "${threadKey}"`
+              : `ChatGPT trả về REJECTED ở vòng cuối cùng (${chatgptStageRound}/${chatgptPlan.maxRounds}) của "${threadKey}"`,
+          targetProviders,
+          sessionMap,
+        });
+      }
     }
   } finally {
     if (fs.existsSync(tempBundlePath)) {
@@ -2545,6 +3829,7 @@ const isMain =
 if (isMain) {
   main().catch((err) => {
     console.error(`Lỗi khi gọi ChatGPT Mentor: ${err.message}`);
-    process.exitCode = 1;
+    process.exitCode =
+      err && typeof err.exitCode === 'number' ? err.exitCode : 1;
   });
 }

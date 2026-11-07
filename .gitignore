@@ -1,7 +1,14 @@
 node_modules/
 .ag-account-*/
 tasks.json
-*_bundle.txt
+review_bundle_*.txt
 .*.tmp
+*.tmp
 *.patch
 .agents/state/checkpoint.patch
+.agents/state/.state_lock.mutex
+.agents/state/.state_lock.recovery.mutex
+.agents/state/.transition_journal.json
+.agents/state/.backups/
+.agents/state/review_snapshots/
+!.agents/state/LAST_REVIEW_BUNDLE.txt

@@ -16,7 +16,10 @@ Ngay khi bắt đầu bất kỳ phiên làm việc nào, Agent **BẮT BUỘC**
   - `[WORKER_MODEL: pro/flash]` (ví dụ `pro` cho task kiến trúc phức tạp, `flash` cho task đơn giản/kiểm thử): Model khuyến nghị cho Worker Agent (Antigravity / Gemini / Claude) khi thực thi task.
   - ChatGPT Mentor mặc định được gọi trực tiếp qua `node .agents/scripts/ask_mentor.mjs --task <task_id>` (không truyền `--model gpt-4o` để tránh làm nhiễu ngữ cảnh), hỗ trợ 3 chế độ `--mode <plan|review-code|rescue>` (mặc định là `plan`), và tự động kích hoạt mức độ suy luận **Cao / High** (`ensureHighReasoning(page)`) trước khi gửi prompt.
 
-### 2.2. Tự động Xoay vòng Luồng Chat theo Task (`SESSION_MAP.json` & `--task <task_id>`)
+### 2.2. Tự động Đồng bộ Project & Xoay vòng Luồng Chat theo Task (`SESSION_MAP.json` & `--task <task_id>`)
+- **Tự động nhận diện & khởi tạo Project trên ChatGPT theo tên dự án Antigravity**:
+  - Khi `"projectName"` trong `.agents/config.json` để trống (`""`), hệ thống tự động lấy **chính xác tên thư mục gốc của Workspace trong Antigravity** làm tên Project mục tiêu.
+  - Khi gọi `ask_mentor.mjs` (hoặc `npm run init-workflow` / `npm run ensure-project`), script tự kiểm tra danh sách Dự án trên sidebar ChatGPT: nếu đã có thì mở vào đúng Project đó (`/g/g-p-.../project`); nếu **chưa có thì tự động bấm "Thêm dự án mới", điền đúng tên dự án Antigravity và tạo Project mới ngay lập tức**, sau đó khóa URL vào `.agents/state/SESSION_MAP.json`.
 - Hệ thống quản lý luồng chat riêng biệt cho từng Task trong `.agents/state/SESSION_MAP.json`:
   - Khi gọi `ask_mentor.mjs`, truyền tham số `--task <task_id>` (ví dụ: `--task task-3`). Nếu không truyền `--task`, script sẽ tự động trích xuất mã Task hiện tại từ tiêu đề `.agents/state/CURRENT_PLAN.md` hoặc mục chưa hoàn thành `[ ]` đầu tiên trong `.agents/state/ROADMAP.md`.
   - **Tiếp tục luồng hiện có**: Nếu `task_id` đã có URL trong `.agents/state/SESSION_MAP.json` (và không truyền `--new-thread`), script tự động điều hướng tab ChatGPT tới đúng URL đó để giữ nguyên mạch review của Task hiện tại.
@@ -63,9 +66,15 @@ Hệ thống tích hợp danh bạ 9 Chuyên gia trong `.agents/roles.json` (`st
 
 ## 3. Quy tắc Khóa An toàn & Bảo vệ Công cụ (Safety Gate & Tool Protection)
 - **Bảo vệ bộ công cụ điều phối**: *"Khi thực hiện các Task trong `ROADMAP.md`, Worker chỉ làm việc trên `src/`, `tests/` và `.agents/state/`. TUYỆT ĐỐI KHÔNG tự ý chỉnh sửa các script trong `.agents/scripts/`."*
-- **Giới hạn phạm vi & số vòng Review Code (`ask_mentor.mjs`)**:
+- **Giới hạn phạm vi & Chính sách Review v2 (`ask_mentor.mjs` & `review_policy.mjs`)**:
   - Ở chế độ `--mode review-code`, chỉ gửi kết quả chạy `npm test` + `git diff HEAD -- src/ tests/` (kèm danh sách/nội dung file mới trong `src/`, `tests/`). Tuyệt đối KHÔNG gửi kèm code của `.agents/` vào gói review.
-  - Giới hạn cứng: Không tự động gửi quá 2 vòng review cho cùng một giai đoạn (`MAX_ROUNDS_PER_STAGE = 2`).
+  - **Ngân sách vòng theo giai đoạn (`stageRounds` trong `SESSION_MAP.json`)**: Bộ đếm vòng gắn với từng giai đoạn (`task-N-plan`, `task-N-review`, `task-N-rescue`), **KHÔNG bị reset khi truyền `--new-thread`**. Giới hạn mặc định trong `.agents/config.json`:
+    - ChatGPT: `plan = 3`, `review-code = 2`, `rescue = 2`.
+    - Gemini: `plan = 2`, `review-code = 2`, `rescue = 2`.
+  - **Severity Gate (P0-only Blocking)**: Chỉ lỗi `P0` mới được phép `REJECTED`; góp ý `P1/P2` tự động lưu vào `.agents/state/TECH_DEBT.md` và vẫn `APPROVED`. Nếu Mentor ghi `REJECTED` mà không nêu P0, script giữ `REJECTED` kèm cảnh báo `REJECT_WITHOUT_P0`.
+  - **Quy tắc Hội tụ & Delta Review**: Từ vòng 2 chỉ kiểm tra các P0 đang mở (`REVIEW_LEDGER.json`) + lỗi `[NEW-P0-xx]` do chính bản sửa gây ra; khi tiếp tục cùng luồng ở pha `plan`, chỉ gửi phần unified diff thay đổi của `CURRENT_PLAN.md` (kèm `.agents/state/REVIEW_RESPONSE.md` nếu có).
+  - **Chính sách 2 Mentor (`dualMentorPolicy: "chatgpt-gate"`)**: ChatGPT giữ quyền quyết định cuối; Gemini vẫn bắt buộc đóng góp ý kiến (khi `--provider both`, Gemini chạy trước để P0 của Gemini được đưa vào prompt ChatGPT thẩm định và đính kèm cuối biên bản).
+  - **Escalation (Exit Code `3`)**: Khi dùng hết số vòng mà vẫn `REJECTED`, script tự động ghi khối `## ⚠️ ESCALATION` vào `.agents/state/HANDOFF.md` và thoát với `exitCode = 3`. **Agent BẮT BUỘC phải dừng lại báo người dùng**, tuyệt đối KHÔNG tự gọi `--reset-rounds` hay `--new-thread` để lách giới hạn. Cờ `--reset-rounds` chỉ dành cho người dùng.
 - **Khóa trước khi sửa code (`--check-plan`)**: Hook `.agents/scripts/check_plan_approved.sh` tự động gọi `node .agents/scripts/verify_guard.mjs --check-plan` trước mọi thao tác ghi/sửa vào `src/`. Thao tác sẽ bị chặn (`exit 2`) nếu `.agents/state/MENTOR_FEEDBACK.md` chưa có `STATUS: APPROVED`.
 - **Khóa trước khi Git Commit (`--pre-commit`)**: Hook `.git/hooks/pre-commit` tự động gọi `node .agents/scripts/verify_guard.mjs --pre-commit`. Khi commit có thay đổi trong `src/` hoặc `tests/`, bắt buộc phải thỏa mãn:
   1. `.agents/state/CODE_REVIEW_FEEDBACK.md` có `CODE_STATUS: APPROVED`.

@@ -16,13 +16,20 @@ const stateFile = (root, name) => path.join(root, '.agents', 'state', name);
 const sha256 = (text) => crypto.createHash('sha256').update(text, 'utf8').digest('hex');
 
 export function loadWorkflowConfig(root = REPO_ROOT) {
+  const defaultProjectName = path.basename(root) || 'AI-WORKSPACE';
   const defaults = {
-    projectName: 'AI-WORKSPACE', cdpUrl: 'http://127.0.0.1:9222', geminiCdpUrl: 'http://127.0.0.1:9223',
+    projectName: defaultProjectName, cdpUrl: 'http://127.0.0.1:9222', geminiCdpUrl: 'http://127.0.0.1:9223',
     sourceDirs: ['src', 'tests'], testCommand: 'npm test', maxReviewRounds: 2,
   };
   try {
     const p = path.join(root, '.agents', 'config.json');
-    if (fs.existsSync(p)) return { ...defaults, ...JSON.parse(fs.readFileSync(p, 'utf8')) };
+    if (fs.existsSync(p)) {
+      const merged = { ...defaults, ...JSON.parse(fs.readFileSync(p, 'utf8')) };
+      if (!merged.projectName || !String(merged.projectName).trim()) {
+        merged.projectName = defaultProjectName;
+      }
+      return merged;
+    }
   } catch (_e) {}
   return defaults;
 }

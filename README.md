@@ -15,9 +15,19 @@ Bộ khung khởi tạo (**Starter Template**) tự động hóa quy trình phá
   - Mặc định thông minh: `--mode plan` -> `architect`; `--mode review-code` -> `qa`; `--mode rescue` -> `architect,workflow`.
   - Hỗ trợ tự động gắn Role Header vào đầu Prompt và tùy chọn `@mention` Custom GPT (`"useGptMention": true` trong `.agents/config.json`).
 - **Quản lý Luồng Chat theo Project & Giai đoạn (`SESSION_MAP.json`)**:
-  - Tự động điều hướng vào thư mục Dự án trên ChatGPT (mặc định `AI-WORKSPACE`).
+  - **Tự động nhận diện & tạo Project trên ChatGPT trùng tên dự án Antigravity**: Mặc định lấy đúng tên thư mục gốc của Workspace trong Antigravity. Nếu trên ChatGPT chưa có Project đó, hệ thống **tự động bấm "Thêm dự án mới", điền tên dự án và khởi tạo Project** ngay khi chạy `npm run init-workflow` hoặc lần gọi `ask_mentor.mjs` đầu tiên!
   - Xoay vòng luồng chat độc lập cho từng Task và từng giai đoạn (`task-1-plan`, `task-1-review`, `task-1-rescue`).
-  - Giới hạn cứng tối đa **2 vòng review** (`maxReviewRounds: 2`) cho mỗi giai đoạn.
+  - **Review Policy v2 (`review_policy.mjs`)**:
+    - Bộ đếm vòng theo giai đoạn (`stageRounds`), không bị reset bởi `--new-thread` (`chatgpt`: `plan=3, review-code=2, rescue=2`; `gemini`: `plan=2, review-code=2, rescue=2`).
+    - **Severity Gate**: chỉ lỗi `P0` mới chặn (`REJECTED`); góp ý `P1/P2` tự động vào `.agents/state/TECH_DEBT.md`.
+    - **Convergence & Delta Review**: từ vòng 2 chỉ kiểm tra P0 đang mở (`REVIEW_LEDGER.json`) + `NEW-P0`, và chỉ gửi unified diff của `CURRENT_PLAN.md` khi tiếp tục cùng luồng.
+    - **Dual-Mentor (`dualMentorPolicy: "chatgpt-gate"`)**: ChatGPT quyết định, Gemini góp ý (khi `--provider both`, Gemini chạy trước để đưa ý kiến thứ hai vào prompt ChatGPT).
+    - **Escalation (`exitCode = 3`)**: hết số vòng sẽ ghi mục `## ⚠️ ESCALATION` vào `HANDOFF.md` và dừng chờ người quyết định. Hỗ trợ `--dry-run` để kiểm tra quyết định mà không chạm Chrome.
+- **"Thư mục Project" riêng cho Gemini (`SESSION_MAP.json` -> `geminiThreads`)**:
+  - Gemini Web không có Project, nên mỗi Task & giai đoạn (`task-4-plan`, `task-4-review`, `task-5-plan`, ...) được lưu một URL hội thoại Gemini riêng — cùng giai đoạn thì mở lại đúng link cũ, sang Task/giai đoạn mới (hoặc `--new-thread`) thì mở đoạn chat Gemini mới tinh, tránh trôi ngữ cảnh và nặng tab.
+  - Lượt đầu của mỗi luồng Gemini mới tự động được bơm `BOOTSTRAP` gồm `ROADMAP.md` + `HANDOFF.md` + `REPO SKELETON MAP` + `CURRENT_PLAN.md`.
+  - Nếu cấu hình `"geminiGemUrl"` (link Gem, ví dụ Gem `AI-WORKSPACE Mentor`), mọi luồng mới sẽ được mở bên trong Gem đó thay vì trang chủ Gemini.
+  - `geminiThreadUrl` (kiểu cũ) chỉ còn là con trỏ "luồng dùng gần nhất" và được tự động di trú vào `geminiThreads["<currentTask>-plan"]`.
 - **Tự động gạt Mức Suy luận (`setThinkingEffort` & `--effort <high|standard>`)**:
   - Tự động chọn mức `high` ("Cao") cho `--mode plan` và `--mode rescue`; tự động chọn mức `standard` ("Chuẩn" / "Trung bình" / "Standard") cho `--mode review-code` để tối ưu tốc độ phản hồi (có thể ghi đè qua `--effort <high|standard>`).
 - **Bản đồ Khung Mã nguồn Tự động (`Repo Skeleton Map`)**:
@@ -48,32 +58,28 @@ Bộ khung khởi tạo (**Starter Template**) tự động hóa quy trình phá
 
 ## 3. Hướng dẫn Sử dụng làm Template cho Dự án Mới
 
-### Bước 1: Clone repo & Cài đặt dependencies
+### Bước 1: Clone bộ khung sang thư mục dự án mới & mở trong Antigravity
 ```bash
-git clone https://github.com/hieungrx/AI_WORK-FLOW.git my-new-project
-cd my-new-project
+git clone https://github.com/hieungrx/AI_WORK-FLOW.git Ten-Du-An-Moi
+cd Ten-Du-An-Moi
 npm install
 ```
+*(Mở thư mục `Ten-Du-An-Moi` làm một Project/Workspace mới trong Antigravity).*
 
-### Bước 2: Khởi tạo dự án mới (`npm run init-workflow`)
-Chạy lệnh dưới đây để cấu hình Git Pre-commit Hook (`.agents/hooks`), đặt tên Project trên ChatGPT, reset toàn bộ trạng thái trong `.agents/state/` và xóa các file demo Todo CLI:
+### Bước 2: Mở trình duyệt Chrome Debug (`start-system.bat`)
+Chạy trực tiếp file `start-system.bat` (Windows) để tự mở 2 profile Chrome độc lập:
+- **Cổng `9222`**: ChatGPT Mentor (`%USERPROFILE%\.chrome-mentor-profile`)
+- **Cổng `9223`**: Google Gemini Mentor (`%USERPROFILE%\.chrome-gemini-profile`)
 
+### Bước 3: Khởi tạo dự án mới (`npm run init-workflow`)
+Chạy lệnh duy nhất dưới đây:
 ```bash
-npm run init-workflow -- --name "TEN_PROJECT_CHATGPT" --clean-demo
+npm run init-workflow
 ```
-*(Nếu chỉ muốn reset trạng thái `.agents/state/` mà vẫn giữ lại code demo Todo CLI để tham khảo, bỏ cờ `--clean-demo`).*
-
-### Bước 3: Mở trình duyệt Chrome với cổng Debug `9222`
-Mở Chrome với Remote Debugging port `9222` và đăng nhập sẵn vào `https://chatgpt.com`:
-
-- **Windows (PowerShell / CMD)**:
-  ```powershell
-  & "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222 --user-data-dir="$env:LOCALAPPDATA\Google\Chrome\User Data\AntigravityCDP"
-  ```
-- **macOS / Linux**:
-  ```bash
-  google-chrome --remote-debugging-port=9222 --user-data-dir="$HOME/.chrome-antigravity-cdp"
-  ```
+Lệnh này sẽ tự động:
+1. Lấy **chính xác tên thư mục dự án Antigravity** (`Ten-Du-An-Moi`) gán vào `.agents/config.json` và `package.json` *(có thể ghi đè tùy ý bằng `-- --name "Tên Khác"`)*.
+2. Kích hoạt Git Pre-commit Hook (`.agents/hooks/pre-commit`) và đặt lại sạch sẽ `.agents/state/*`.
+3. Kết nối tới Chrome cổng `9222`: nếu trên ChatGPT **chưa có Project `Ten-Du-An-Moi`**, hệ thống sẽ **tự động tạo luôn Project mới** và khóa link `/g/g-p-.../project` vào `.agents/state/SESSION_MAP.json`! *(Nếu lúc chạy chưa bật Chrome, hệ thống vẫn tự tạo Project ở ngay lần gọi `ask_mentor.mjs` đầu tiên).*
 
 ---
 
@@ -114,14 +120,22 @@ Mở Chrome với Remote Debugging port `9222` và đăng nhập sẵn vào `htt
 
 ## 5. Tùy chỉnh Cấu hình (`.agents/config.json`)
 
-File `.agents/config.json` cho phép cấu hình nhanh thông số dự án:
+File `.agents/config.json` cho phép cấu hình nhanh thông số dự án (khi `"projectName": ""` để trống, hệ thống tự động lấy tên thư mục gốc của dự án trong Antigravity):
 ```json
 {
-  "projectName": "AI-WORKSPACE",
+  "projectName": "",
   "cdpUrl": "http://127.0.0.1:9222",
+  "geminiCdpUrl": "http://127.0.0.1:9223",
+  "geminiGemUrl": "",
   "sourceDirs": ["src", "tests"],
   "testCommand": "npm test",
-  "maxReviewRounds": 2,
-  "useGptMention": false
+  "maxReviewRounds": {
+    "chatgpt": { "plan": 3, "review-code": 2, "rescue": 2 },
+    "gemini": { "plan": 2, "review-code": 2, "rescue": 2 }
+  },
+  "dualMentorPolicy": "chatgpt-gate",
+  "useGptMention": true
 }
 ```
+
+- `geminiGemUrl`: Dán link Gem của bạn (dạng `https://gemini.google.com/gem/<gemId>`). Tạo Gem tại **Gemini → Gems → Trình quản lý Gem → Gem mới**, đặt tên `AI-WORKSPACE Mentor` và dán quy tắc review kiến trúc vào ô **Hướng dẫn / Instructions**. Nếu lỡ dán link một cuộc trò chuyện trong Gem (`/gem/<gemId>/<chatId>`), script tự cắt về link gốc của Gem. Để trống `""` = dùng Gemini thường.

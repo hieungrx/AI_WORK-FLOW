@@ -1,18 +1,21 @@
 {
-  "name": "ai-workflow",
+  "name": "ai-workflow-template",
   "version": "1.0.0",
+  "description": "Multi-Account Antigravity + Dual-Mentor (ChatGPT & Gemini) RPIR Starter Template",
   "main": "index.js",
   "scripts": {
-    "test": "node src/todo.test.js && node tests/fs_fault.test.js",
+    "test": "node .agents/scripts/run_tests.mjs",
+    "test:workflow": "node .agents/tests/review_policy.test.mjs",
     "ask-mentor": "node .agents/scripts/ask_mentor.mjs",
     "ask-gemini": "node .agents/scripts/ask_mentor.mjs --provider gemini",
+    "ask-both": "node .agents/scripts/ask_mentor.mjs --provider both",
+    "ensure-project": "node .agents/scripts/ask_mentor.mjs --ensure-project",
     "init-workflow": "node .agents/scripts/init_project.mjs",
     "checkpoint": "node .agents/scripts/checkpoint.mjs"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "description": "Multi-Account Antigravity + ChatGPT Mentor RPIR Starter Template",
   "dependencies": {
     "playwright-core": "^1.65.0"
   }
