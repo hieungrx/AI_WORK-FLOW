@@ -142,6 +142,6 @@ File `.agents/config.json` cho phép cấu hình nhanh thông số dự án (khi
 
 - `chatgptComposerMode`: Chế độ trình soạn thảo bên trong ChatGPT Project (`"work"` = **Công việc**, `"chat"` = **Trò chuyện** — có thể ghi đè từng lệnh bằng `--composer <work|chat>`):
   - **`"work"` (*Công việc* — Mặc định khuyên dùng)**: Hiện bộ chọn mô hình ngay tại khung chat (VD `GPT-6.1 Sol`), hỗ trợ gắn thẻ **`@Plugin` chuyên gia** và thanh suy luận 5 nấc (`Nhẹ nhàng` / `Vừa` / `Cao` / `Chuyên sâu` / `Max`).
-  - **`"chat"` (*Trò chuyện*)**: Không hiển thị bộ chọn mô hình, chỉ có **3 cấp suy luận** (`Tức thì` / `Vừa` / `Cao` — điều khiển qua `--effort <instant|standard|high>`), và tự động dùng khối Role Header trong prompt thay cho `@Plugin`.
+  - **`"chat"` (*Trò chuyện*)**: Không hiển thị bộ chọn mô hình, chỉ có **3 cấp suy luận** (`Tức thì` / `Vừa` / `Cao` — điều khiển qua `--effort <instant|standard|high>`), vẫn hỗ trợ `@Plugin` chuyên gia và khối Role Header trong prompt.
 - `chatgptModel`: Tên mô hình muốn tự động chọn ở chế độ `"work"` (VD `"GPT-6.1 Sol"`). Để trống `""` = giữ nguyên mô hình đang chọn trên trình duyệt.
 - `geminiGemUrl`: Dán link Gem của bạn (dạng `https://gemini.google.com/gem/<gemId>`). Tạo Gem tại **Gemini → Gems → Trình quản lý Gem → Gem mới**, đặt tên `AI-WORKSPACE Mentor` và dán quy tắc review kiến trúc vào ô **Hướng dẫn / Instructions**. Nếu lỡ dán link một cuộc trò chuyện trong Gem (`/gem/<gemId>/<chatId>`), script tự cắt về link gốc của Gem. Để trống `""` = dùng Gemini thường.

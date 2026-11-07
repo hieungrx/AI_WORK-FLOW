@@ -348,7 +348,8 @@ export function normalizeComposerMode(raw) {
 
 /**
  * Xác định chế độ khung chat hiệu lực: `--composer` > `.agents/config.json -> chatgptComposerMode` > `work`.
- * Mặc định `work` vì đây là chế độ duy nhất hỗ trợ `@Plugin` chuyên gia và chọn mô hình.
+ * Mặc định `work` vì đây là chế độ hỗ trợ chọn mô hình và thanh suy luận 5 nấc.
+ * Cả hai chế độ đều hỗ trợ `@Plugin` chuyên gia.
  *
  * @param {string} [composerArg='']
  * @param {{ chatgptComposerMode?: string }} [config={}]
@@ -3814,13 +3815,7 @@ async function main() {
         }
       }
 
-      if (composerMode === 'chat') {
-        console.log(
-          '[ROLE MENTION]: Chế độ "Trò chuyện" không hỗ trợ @Plugin — dùng khối Role Header trong prompt thay thế.'
-        );
-      } else {
-        await tryInvokeGptMention(page, promptTextarea, selectedRoles);
-      }
+      await tryInvokeGptMention(page, promptTextarea, selectedRoles);
       await fillPromptFast(promptTextarea, reviewPrompt);
       await page.keyboard.press('Space').catch(() => {});
 
