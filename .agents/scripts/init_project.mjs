@@ -67,6 +67,8 @@ function cleanTransientStateFiles() {
     'LAST_REVIEW_BUNDLE.txt',
     'checkpoint.patch',
     '.transition_journal.json',
+    'HUMAN_DECISION.json',
+    'ESCALATION_SESSION.json',
   ];
   for (const fileName of transientFiles) {
     const fullPath = path.join(STATE_DIR, fileName);

@@ -23,6 +23,10 @@ import {
   getStageRounds,
   incrementStageRound,
   resetStageRounds,
+  getBonusRounds,
+  grantExtraRounds,
+  autoExtendStageRound,
+  evaluateAdaptiveRound,
   checkRoundBudget,
   buildSeverityRules,
   parseSeverityReport,
@@ -51,6 +55,11 @@ import {
   renderAdvisorySection,
   combineDualStatus,
 } from './review_policy.mjs';
+import {
+  sendEscalationTelegram,
+  sendWorkflowNotification,
+  buildPlainEscalationSummary,
+} from './telegram.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -3186,7 +3195,9 @@ function prepareProviderPromptPlan({
   }
 
   const usedRounds = getStageRounds(sessionMap, threadKey, provider);
-  const maxRounds = resolveMaxRounds(WORKFLOW_CONFIG.maxReviewRounds, provider, mode);
+  const maxRounds =
+    resolveMaxRounds(WORKFLOW_CONFIG.maxReviewRounds, provider, mode) +
+    getBonusRounds(sessionMap, threadKey, provider);
   const nextRound = usedRounds + 1;
   const ledger = loadLedger(REVIEW_LEDGER_FILE);
   const openIssues = getOpenIssues(ledger, threadKey, provider);
@@ -3349,7 +3360,7 @@ function clearEscalationIfPresent(threadKey) {
   }
 }
 
-function recordEscalationAndThrow({
+async function recordEscalationAndThrow({
   taskId,
   threadKey,
   mode,
@@ -3374,6 +3385,15 @@ function recordEscalationAndThrow({
       lastStatus[p] = rounds[rounds.length - 1].status;
     }
   }
+  const plainSummary = buildPlainEscalationSummary({
+    projectName: DEFAULT_PROJECT_NAME,
+    taskId,
+    threadKey,
+    mode,
+    reason,
+    budget,
+    openIssues,
+  });
   const block = renderEscalationBlock({
     taskId,
     threadKey,
@@ -3381,6 +3401,7 @@ function recordEscalationAndThrow({
     budget,
     openIssues,
     lastStatus,
+    plainSummary,
   });
   const currentHandoff = readFileSafe(HANDOFF_FILE);
   fs.mkdirSync(STATE_DIR, { recursive: true });
@@ -3389,8 +3410,27 @@ function recordEscalationAndThrow({
     upsertEscalation(currentHandoff, threadKey, block),
     'utf8'
   );
+  const tgRes = await sendEscalationTelegram({
+    repoRoot: REPO_ROOT,
+    projectName: DEFAULT_PROJECT_NAME,
+    taskId,
+    threadKey,
+    mode,
+    reason,
+    budget,
+    openIssues,
+  }).catch((err) => ({ sent: false, reason: err.message }));
+  if (tgRes?.sent) {
+    console.log(
+      `[TELEGRAM ESCALATION]: Đã gửi thông báo giải thích dễ hiểu + bàn phím quyết định 2 chiều tới Telegram (chat_id: ${tgRes.chatId}). Hãy chạy: node .agents/scripts/await_decision.mjs --task ${taskId}`
+    );
+  } else {
+    console.log(
+      `[TELEGRAM NOTE]: Chưa gửi được thông báo Telegram (${tgRes?.reason || 'chưa cấu hình chat_id'}). Khi nhắn /start cho Bot và chạy "npm run telegram-setup", thông báo sẽ tự động gửi.`
+    );
+  }
   throw new EscalationError(
-    `[ESCALATION - EXIT ${ESCALATION_EXIT_CODE}]: ${reason} — Đã ghi khối ESCALATION vào .agents/state/HANDOFF.md. Agent phải DỪNG lại chờ người quyết định.`
+    `[ESCALATION - EXIT ${ESCALATION_EXIT_CODE}]: ${reason} — Đã ghi khối ESCALATION vào .agents/state/HANDOFF.md. Agent phải chạy "node .agents/scripts/await_decision.mjs --task ${taskId}" hoặc DỪNG lại chờ người quyết định.`
   );
 }
 
@@ -3549,7 +3589,7 @@ async function main() {
       .filter((d) => d.used >= d.max)
       .map((d) => `${d.provider} (${d.used}/${d.max})`)
       .join(', ');
-    recordEscalationAndThrow({
+    await recordEscalationAndThrow({
       taskId,
       threadKey,
       mode,
@@ -3737,15 +3777,33 @@ async function main() {
         if (provider === 'gemini') {
           if (geminiResult.status === 'APPROVED') {
             clearEscalationIfPresent(threadKey);
-          } else if (geminiStageRound >= geminiPlan.maxRounds) {
-            recordEscalationAndThrow({
-              taskId,
-              threadKey,
-              mode,
-              reason: `Gemini trả về REJECTED ở vòng cuối cùng (${geminiStageRound}/${geminiPlan.maxRounds}) của "${threadKey}"`,
-              targetProviders: ['gemini'],
+          } else {
+            const adaptiveGem = evaluateAdaptiveRound({
+              ledger: loadLedger(REVIEW_LEDGER_FILE),
               sessionMap,
+              threadKey,
+              provider: 'gemini',
+              mode,
+              maxRoundsConfig: WORKFLOW_CONFIG.maxReviewRounds,
+              adaptiveConfig: WORKFLOW_CONFIG.adaptiveRounds,
             });
+            if (adaptiveGem.extended) {
+              saveSessionMap(sessionMap);
+              console.log(
+                `[ADAPTIVE ROUNDS - GEMINI]: ${adaptiveGem.reason} -> Ngân sách mới: ${adaptiveGem.used}/${adaptiveGem.max}`
+              );
+            } else if (adaptiveGem.shouldEscalate) {
+              await recordEscalationAndThrow({
+                taskId,
+                threadKey,
+                mode,
+                reason:
+                  adaptiveGem.reason ||
+                  `Gemini trả về REJECTED ở vòng cuối cùng (${geminiStageRound}/${geminiPlan.maxRounds}) của "${threadKey}"`,
+                targetProviders: ['gemini'],
+                sessionMap,
+              });
+            }
           }
         }
       } catch (geminiErr) {
@@ -4036,21 +4094,41 @@ async function main() {
         console.log(`STATUS: ${finalStatus}`);
       }
 
-      if (
-        finalStatus === 'REJECTED' &&
-        chatgptStageRound >= chatgptPlan.maxRounds
-      ) {
-        recordEscalationAndThrow({
-          taskId,
-          threadKey,
-          mode,
-          reason:
-            mode === 'rescue'
-              ? `Đã dùng hết ${chatgptStageRound}/${chatgptPlan.maxRounds} lượt RESCUE (Circuit Breaker) cho "${threadKey}"`
-              : `ChatGPT trả về REJECTED ở vòng cuối cùng (${chatgptStageRound}/${chatgptPlan.maxRounds}) của "${threadKey}"`,
-          targetProviders,
+      if (finalStatus === 'APPROVED') {
+        await sendWorkflowNotification({
+          repoRoot: REPO_ROOT,
+          eventType: mode === 'review-code' ? 'code-approved' : 'plan-approved',
+          text: `✅ [${DEFAULT_PROJECT_NAME}] ${taskId} (${threadKey}): Đã được Mentor duyệt (${mode === 'review-code' ? 'CODE_STATUS: APPROVED' : 'STATUS: APPROVED'}) ở vòng ${chatgptStageRound}!`,
+        }).catch(() => {});
+      } else if (finalStatus === 'REJECTED') {
+        const adaptiveGpt = evaluateAdaptiveRound({
+          ledger: loadLedger(REVIEW_LEDGER_FILE),
           sessionMap,
+          threadKey,
+          provider: 'chatgpt',
+          mode,
+          maxRoundsConfig: WORKFLOW_CONFIG.maxReviewRounds,
+          adaptiveConfig: WORKFLOW_CONFIG.adaptiveRounds,
         });
+        if (adaptiveGpt.extended) {
+          saveSessionMap(sessionMap);
+          console.log(
+            `[ADAPTIVE ROUNDS - CHATGPT]: ${adaptiveGpt.reason} -> Ngân sách mới: ${adaptiveGpt.used}/${adaptiveGpt.max}`
+          );
+        } else if (adaptiveGpt.shouldEscalate) {
+          await recordEscalationAndThrow({
+            taskId,
+            threadKey,
+            mode,
+            reason:
+              mode === 'rescue'
+                ? `Đã dùng hết ${chatgptStageRound}/${adaptiveGpt.max} lượt RESCUE (Circuit Breaker) cho "${threadKey}"`
+                : adaptiveGpt.reason ||
+                  `ChatGPT trả về REJECTED ở vòng cuối cùng (${chatgptStageRound}/${adaptiveGpt.max}) của "${threadKey}"`,
+            targetProviders,
+            sessionMap,
+          });
+        }
       }
     }
   } finally {

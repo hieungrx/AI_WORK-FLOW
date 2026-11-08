@@ -33,6 +33,11 @@ export const DEFAULT_MAX_ROUNDS = Object.freeze({
   chatgpt: Object.freeze({ plan: 3, 'review-code': 2, rescue: 2 }),
   gemini: Object.freeze({ plan: 2, 'review-code': 2, rescue: 2 }),
 });
+export const DEFAULT_ADAPTIVE_ROUNDS = Object.freeze({
+  enabled: true,
+  hardCap: Object.freeze({ plan: 6, 'review-code': 4, rescue: 3 }),
+  stallRounds: 2,
+});
 export const DEFAULT_DUAL_MENTOR_POLICY = 'chatgpt-gate';
 export const DELTA_MAX_RATIO = 0.6;
 
@@ -90,6 +95,20 @@ export function normalizeStageRounds(raw) {
     entry.resets = Array.isArray(val.resets)
       ? val.resets.filter((r) => r && typeof r === 'object').map((r) => ({ ...r }))
       : [];
+    if (val.autoExtended && typeof val.autoExtended === 'object' && !Array.isArray(val.autoExtended)) {
+      entry.autoExtended = {};
+      for (const p of PROVIDERS) {
+        const n = Number(val.autoExtended[p]);
+        if (Number.isInteger(n) && n > 0) entry.autoExtended[p] = n;
+      }
+    }
+    if (val.humanExtra && typeof val.humanExtra === 'object' && !Array.isArray(val.humanExtra)) {
+      entry.humanExtra = {};
+      for (const p of PROVIDERS) {
+        const n = Number(val.humanExtra[p]);
+        if (Number.isInteger(n) && n > 0) entry.humanExtra[p] = n;
+      }
+    }
     out[key] = entry;
   }
   return out;
@@ -143,6 +162,8 @@ export function resetStageRounds(sessionMap, threadKey, providers = PROVIDERS, n
   for (const p of providers) {
     before[p] = Number(entry[p]) || 0;
     entry[p] = 0;
+    if (entry.autoExtended) delete entry.autoExtended[p];
+    if (entry.humanExtra) delete entry.humanExtra[p];
   }
   entry.resets = Array.isArray(entry.resets) ? entry.resets : [];
   entry.resets.push({ at: now.toISOString(), by: '--reset-rounds', before });
@@ -150,18 +171,204 @@ export function resetStageRounds(sessionMap, threadKey, providers = PROVIDERS, n
   return entry;
 }
 
+/** Tổng số vòng được cộng thêm (do tự động co giãn + do người cấp qua Telegram). */
+export function getBonusRounds(sessionMap, threadKey, provider) {
+  const entry = sessionMap?.stageRounds?.[threadKey];
+  if (!entry || typeof entry !== 'object') return 0;
+  const autoExt = Number(entry?.autoExtended?.[provider]) || 0;
+  const humanExt = Number(entry?.humanExtra?.[provider]) || 0;
+  return Math.max(0, autoExt) + Math.max(0, humanExt);
+}
+
+/** Cấp thêm N vòng từ quyết định của người dùng (Telegram / CLI) mà không xóa lịch sử số vòng đã dùng. */
+export function grantExtraRounds(
+  sessionMap,
+  threadKey,
+  providers = PROVIDERS,
+  extra = 2,
+  by = 'telegram',
+  now = new Date()
+) {
+  const add = Math.max(1, Number(extra) || 1);
+  sessionMap.stageRounds = sessionMap.stageRounds || {};
+  const entry =
+    sessionMap.stageRounds[threadKey] ||
+    (sessionMap.stageRounds[threadKey] = { chatgpt: 0, gemini: 0, updatedAt: '', resets: [] });
+  entry.humanExtra = entry.humanExtra || {};
+  const granted = {};
+  for (const p of providers) {
+    entry.humanExtra[p] = (Number(entry.humanExtra[p]) || 0) + add;
+    granted[p] = entry.humanExtra[p];
+  }
+  entry.resets = Array.isArray(entry.resets) ? entry.resets : [];
+  entry.resets.push({ at: now.toISOString(), by, extra: add, granted });
+  entry.updatedAt = now.toISOString();
+  return entry;
+}
+
+/** Tự động cộng thêm 1 vòng khi số lượng P0 đang giảm (hội tụ tốt) và chưa chạm trần hardCap. */
+export function autoExtendStageRound(
+  sessionMap,
+  threadKey,
+  provider,
+  reason = 'P0 giảm qua các vòng',
+  now = new Date()
+) {
+  sessionMap.stageRounds = sessionMap.stageRounds || {};
+  const entry =
+    sessionMap.stageRounds[threadKey] ||
+    (sessionMap.stageRounds[threadKey] = { chatgpt: 0, gemini: 0, updatedAt: '', resets: [] });
+  entry.autoExtended = entry.autoExtended || {};
+  entry.autoExtended[provider] = (Number(entry.autoExtended[provider]) || 0) + 1;
+  entry.resets = Array.isArray(entry.resets) ? entry.resets : [];
+  entry.resets.push({
+    at: now.toISOString(),
+    by: 'adaptive-auto-extend',
+    provider,
+    reason,
+    autoExtended: entry.autoExtended[provider],
+  });
+  entry.updatedAt = now.toISOString();
+  return entry.autoExtended[provider];
+}
+
 /**
- * Kiểm tra ngân sách vòng cho các provider sắp gửi.
- * @returns {{ ok: boolean, details: Array<{ provider: string, used: number, max: number, next: number }>, exhausted: string[] }}
+ * Kiểm tra ngân sách vòng cho các provider sắp gửi (đã tính cả autoExtended + humanExtra).
+ * @returns {{ ok: boolean, details: Array<{ provider: string, used: number, max: number, baseMax: number, bonus: number, next: number }>, exhausted: string[] }}
  */
 export function checkRoundBudget(sessionMap, threadKey, providers, maxRoundsConfig, mode) {
   const details = providers.map((provider) => {
     const used = getStageRounds(sessionMap, threadKey, provider);
-    const max = resolveMaxRounds(maxRoundsConfig, provider, mode);
-    return { provider, used, max, next: used + 1 };
+    const baseMax = resolveMaxRounds(maxRoundsConfig, provider, mode);
+    const bonus = getBonusRounds(sessionMap, threadKey, provider);
+    const max = baseMax + bonus;
+    return { provider, used, max, baseMax, bonus, next: used + 1 };
   });
   const exhausted = details.filter((d) => d.used >= d.max).map((d) => d.provider);
   return { ok: exhausted.length === 0, details, exhausted };
+}
+
+/**
+ * Đánh giá hội tụ sau mỗi vòng REJECTED để quyết định:
+ * - Tự động cộng thêm 1 vòng (`extended: true`) nếu P0 giảm so với vòng trước và chưa chạm `hardCap`.
+ * - Báo bế tắc sớm (`stalled: true`) nếu cùng tập P0 lặp lại `stallRounds` vòng liên tiếp không giảm.
+ */
+export function evaluateAdaptiveRound({
+  ledger,
+  sessionMap,
+  threadKey,
+  provider,
+  mode,
+  maxRoundsConfig,
+  adaptiveConfig = DEFAULT_ADAPTIVE_ROUNDS,
+  now = new Date(),
+}) {
+  const cfg = {
+    ...DEFAULT_ADAPTIVE_ROUNDS,
+    ...(adaptiveConfig && typeof adaptiveConfig === 'object' ? adaptiveConfig : {}),
+    hardCap: {
+      ...DEFAULT_ADAPTIVE_ROUNDS.hardCap,
+      ...(adaptiveConfig?.hardCap && typeof adaptiveConfig.hardCap === 'object'
+        ? adaptiveConfig.hardCap
+        : {}),
+    },
+  };
+  const used = getStageRounds(sessionMap, threadKey, provider);
+  const baseMax = resolveMaxRounds(maxRoundsConfig, provider, mode);
+  const bonus = getBonusRounds(sessionMap, threadKey, provider);
+  const currentMax = baseMax + bonus;
+  const hardCap = Math.max(currentMax, Number(cfg.hardCap?.[mode]) || currentMax);
+
+  if (!cfg.enabled) {
+    return {
+      extended: false,
+      stalled: false,
+      shouldEscalate: used >= currentMax,
+      reason: used >= currentMax ? `Đã dùng hết ${used}/${currentMax} vòng` : '',
+      used,
+      max: currentMax,
+      hardCap,
+    };
+  }
+
+  const rounds = Array.isArray(ledger?.[threadKey]?.[provider])
+    ? ledger[threadKey][provider]
+    : [];
+  if (rounds.length < 2) {
+    return {
+      extended: false,
+      stalled: false,
+      shouldEscalate: used >= currentMax,
+      reason: used >= currentMax ? `Đã dùng hết ${used}/${currentMax} vòng` : '',
+      used,
+      max: currentMax,
+      hardCap,
+    };
+  }
+
+  const currRound = rounds[rounds.length - 1];
+  const prevRound = rounds[rounds.length - 2];
+  const currP0 = Array.isArray(currRound?.p0) ? currRound.p0 : [];
+  const prevP0 = Array.isArray(prevRound?.p0) ? prevRound.p0 : [];
+
+  // 1. Kiểm tra bế tắc (Stall): cùng tập ID P0 (>0) lặp lại stallRounds vòng liên tiếp
+  const stallCount = Math.max(2, Number(cfg.stallRounds) || 2);
+  if (rounds.length >= stallCount && currP0.length > 0) {
+    const tail = rounds.slice(-stallCount);
+    const sigs = tail.map((r) =>
+      (Array.isArray(r?.p0) ? r.p0 : [])
+        .map((i) => String(i.id || '').toUpperCase())
+        .filter(Boolean)
+        .sort()
+        .join(',')
+    );
+    if (sigs[0] && sigs.every((s) => s === sigs[0])) {
+      return {
+        extended: false,
+        stalled: true,
+        shouldEscalate: true,
+        reason: `Bế tắc (Stall): Cùng lỗi P0 [${sigs[0]}] lặp lại ${stallCount} vòng liên tiếp không giảm (${used}/${currentMax} vòng)`,
+        used,
+        max: currentMax,
+        hardCap,
+      };
+    }
+  }
+
+  // 2. Nếu chạm ngân sách hiện tại nhưng số lượng P0 đang giảm và chưa chạm hardCap -> tự động gia hạn +1 vòng
+  if (
+    used >= currentMax &&
+    currentMax < hardCap &&
+    prevP0.length > 0 &&
+    currP0.length > 0 &&
+    currP0.length < prevP0.length
+  ) {
+    const reason = `Số lỗi P0 giảm từ ${prevP0.length} xuống ${currP0.length} — tự động cộng +1 vòng (tối đa ${hardCap})`;
+    autoExtendStageRound(sessionMap, threadKey, provider, reason, now);
+    const newMax = baseMax + getBonusRounds(sessionMap, threadKey, provider);
+    return {
+      extended: true,
+      stalled: false,
+      shouldEscalate: false,
+      reason,
+      used,
+      max: newMax,
+      hardCap,
+    };
+  }
+
+  const exhausted = used >= currentMax;
+  return {
+    extended: false,
+    stalled: false,
+    shouldEscalate: exhausted,
+    reason: exhausted
+      ? `Đã dùng hết ${used}/${currentMax} vòng (trần tối đa: ${hardCap})`
+      : '',
+    used,
+    max: currentMax,
+    hardCap,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -433,7 +640,16 @@ export function buildPlanDeltaBody(diffText, reviewResponse = '') {
 const escStart = (key) => `<!-- ESCALATION_START:${key} -->`;
 const escEnd = (key) => `<!-- ESCALATION_END:${key} -->`;
 
-export function renderEscalationBlock({ taskId, threadKey, reason, budget = [], openIssues = {}, lastStatus = {}, now = new Date() }) {
+export function renderEscalationBlock({
+  taskId,
+  threadKey,
+  reason,
+  budget = [],
+  openIssues = {},
+  lastStatus = {},
+  plainSummary = '',
+  now = new Date(),
+}) {
   const budgetLines = budget.map((b) => `  - ${b.provider}: đã dùng ${b.used}/${b.max} vòng`);
   const issueLines = [];
   for (const [provider, list] of Object.entries(openIssues)) {
@@ -450,14 +666,21 @@ export function renderEscalationBlock({ taskId, threadKey, reason, budget = [], 
     `- **Thời điểm**: \`${now.toISOString()}\``,
     `- **Task**: \`${taskId}\``,
     `- **Lý do**: ${reason}`,
+    ...(plainSummary
+      ? ['- **Tóm tắt dễ hiểu cho bạn**:', ...plainSummary.split('\n').map((l) => `  ${l}`)]
+      : []),
     '- **Ngân sách vòng**:',
     ...(budgetLines.length ? budgetLines : ['  - (không có dữ liệu)']),
     '- **Trạng thái gần nhất**:',
     ...(statusLines.length ? statusLines : ['  - (chưa có)']),
     '- **P0 còn mở**:',
     ...(issueLines.length ? issueLines : ['  - (không có P0 nào được ghi nhận)']),
-    '- **Lựa chọn cho người**: (1) chấp nhận rủi ro và tự duyệt; (2) tách phạm vi Task; (3) nâng `maxReviewRounds` trong `.agents/config.json`; (4) chạy `node .agents/scripts/ask_mentor.mjs --reset-rounds --task <task> --mode <mode>`.',
-    '- **Agent**: DỪNG lại, không tự mở luồng mới / không tự reset.',
+    '- **Lựa chọn cho người**: (1) Bấm nút quyết định trực tiếp trên Telegram (chạy `node .agents/scripts/await_decision.mjs --task ' +
+      taskId +
+      '`); (2) chấp nhận rủi ro và tự duyệt; (3) tách phạm vi Task; (4) chạy `node .agents/scripts/ask_mentor.mjs --reset-rounds --task <task> --mode <mode>`.',
+    '- **Agent**: Chạy `node .agents/scripts/await_decision.mjs --task ' +
+      taskId +
+      '` để chờ quyết định từ Telegram (hoặc dừng chờ người dùng), tuyệt đối không tự mở luồng mới / không tự reset.',
     escEnd(threadKey),
   ].join('\n');
 }

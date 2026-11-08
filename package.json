@@ -11,7 +11,9 @@
     "ask-both": "node .agents/scripts/ask_mentor.mjs --provider both",
     "ensure-project": "node .agents/scripts/ask_mentor.mjs --ensure-project",
     "init-workflow": "node .agents/scripts/init_project.mjs",
-    "checkpoint": "node .agents/scripts/checkpoint.mjs"
+    "checkpoint": "node .agents/scripts/checkpoint.mjs",
+    "telegram-setup": "node .agents/scripts/telegram_setup.mjs",
+    "await-decision": "node .agents/scripts/await_decision.mjs"
   },
   "keywords": [],
   "author": "",

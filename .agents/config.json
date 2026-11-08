@@ -23,5 +23,22 @@
   "chatgptModel": "",
   "geminiGemUrl": "",
   "dualMentorPolicy": "chatgpt-gate",
-  "useGptMention": true
+  "useGptMention": true,
+  "adaptiveRounds": {
+    "enabled": true,
+    "hardCap": {
+      "plan": 6,
+      "review-code": 4,
+      "rescue": 3
+    },
+    "stallRounds": 2
+  },
+  "telegram": {
+    "notify": [
+      "escalation",
+      "plan-approved",
+      "code-approved",
+      "rescue"
+    ]
+  }
 }

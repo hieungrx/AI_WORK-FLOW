@@ -14,6 +14,10 @@ import {
   getStageRounds,
   incrementStageRound,
   resetStageRounds,
+  getBonusRounds,
+  grantExtraRounds,
+  autoExtendStageRound,
+  evaluateAdaptiveRound,
   checkRoundBudget,
   buildSeverityRules,
   parseSeverityReport,
@@ -47,6 +51,12 @@ import {
   resolveComposerMode,
 } from '../scripts/ask_mentor.mjs';
 import { loadWorkflowConfig } from '../scripts/verify_guard.mjs';
+import {
+  DECISION_EXIT_CODES,
+  buildPlainEscalationSummary,
+  sendEscalationTelegram,
+  waitForTelegramDecision,
+} from '../scripts/telegram.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const REPO_ROOT = path.resolve(path.dirname(__filename), '..', '..');
@@ -423,5 +433,206 @@ test('RP-12: Chế độ khung chat Project (Trò chuyện / Công việc) qua -
   assert.equal(parseArgs([]).composerArg, '');
   assert.throws(() => parseArgs(['--composer', 'codex']), /--composer không hợp lệ/);
 });
+
+test('RP-13: Adaptive Rounds — tự động cộng vòng khi P0 giảm, báo bế tắc sớm (Stall) khi P0 lặp lại, và hỗ trợ grantExtraRounds', () => {
+  const session = normalizeSessionMap({
+    currentTask: 'task-7',
+    stageRounds: {
+      'task-7-plan': { chatgpt: 3, gemini: 0, updatedAt: '', resets: [] },
+    },
+  });
+  const ledger = {
+    'task-7-plan': {
+      chatgpt: [
+        { round: 1, status: 'REJECTED', p0: [{ id: 'P0-01' }, { id: 'P0-02' }, { id: 'P0-03' }] },
+        { round: 2, status: 'REJECTED', p0: [{ id: 'P0-01' }, { id: 'P0-02' }] },
+        { round: 3, status: 'REJECTED', p0: [{ id: 'P0-01' }] },
+      ],
+    },
+  };
+
+  // Trường hợp 1: Đạt 3/3 vòng nhưng P0 giảm từ 2 -> 1 => tự động cộng +1 vòng (max mới = 4)
+  const res1 = evaluateAdaptiveRound({
+    ledger,
+    sessionMap: session,
+    threadKey: 'task-7-plan',
+    provider: 'chatgpt',
+    mode: 'plan',
+    maxRoundsConfig: { chatgpt: { plan: 3 } },
+    adaptiveConfig: { enabled: true, hardCap: { plan: 6 }, stallRounds: 2 },
+  });
+  assert.equal(res1.extended, true);
+  assert.equal(res1.shouldEscalate, false);
+  assert.equal(res1.max, 4);
+  assert.equal(getBonusRounds(session, 'task-7-plan', 'chatgpt'), 1);
+
+  // Trường hợp 2: Vòng 4 vẫn lặp lại đúng [P0-01] (2 vòng liên tiếp cùng P0-01) => báo Stall và Escalate ngay
+  incrementStageRound(session, 'task-7-plan', 'chatgpt');
+  ledger['task-7-plan'].chatgpt.push({
+    round: 4,
+    status: 'REJECTED',
+    p0: [{ id: 'P0-01' }],
+  });
+  const res2 = evaluateAdaptiveRound({
+    ledger,
+    sessionMap: session,
+    threadKey: 'task-7-plan',
+    provider: 'chatgpt',
+    mode: 'plan',
+    maxRoundsConfig: { chatgpt: { plan: 3 } },
+    adaptiveConfig: { enabled: true, hardCap: { plan: 6 }, stallRounds: 2 },
+  });
+  assert.equal(res2.stalled, true);
+  assert.equal(res2.shouldEscalate, true);
+
+  // Trường hợp 3: Người dùng cấp thêm +2 vòng qua Telegram (grantExtraRounds)
+  grantExtraRounds(session, 'task-7-plan', ['chatgpt'], 2, 'telegram');
+  assert.equal(getBonusRounds(session, 'task-7-plan', 'chatgpt'), 3);
+  const budgetAfterGrant = checkRoundBudget(
+    session,
+    'task-7-plan',
+    ['chatgpt'],
+    { chatgpt: { plan: 3 } },
+    'plan'
+  );
+  assert.equal(budgetAfterGrant.ok, true);
+  assert.equal(budgetAfterGrant.details[0].max, 6);
+});
+
+await (async () => {
+  const tmpRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'rp-tg-'));
+  try {
+    fs.mkdirSync(path.join(tmpRepo, '.agents', 'state'), { recursive: true });
+    fs.writeFileSync(
+      path.join(tmpRepo, '.agents', 'state', 'ROADMAP.md'),
+      '# ROADMAP\n- [ ] Task 8: Tích hợp thanh toán Stripe\n',
+      'utf8'
+    );
+    fs.writeFileSync(
+      path.join(tmpRepo, '.agents', 'state', 'CURRENT_PLAN.md'),
+      '# CURRENT_PLAN\nChi tiết thiết kế Task 8\n',
+      'utf8'
+    );
+    fs.writeFileSync(
+      path.join(tmpRepo, '.agents', 'state', 'HANDOFF.md'),
+      '# HANDOFF\nNội dung bàn giao.\n',
+      'utf8'
+    );
+    fs.writeFileSync(
+      path.join(tmpRepo, '.agents', 'state', 'SESSION_MAP.json'),
+      JSON.stringify(
+        {
+          currentTask: 'task-8',
+          threads: {},
+          geminiThreads: {},
+          stageRounds: { 'task-8-plan': { chatgpt: 3, gemini: 0, updatedAt: '', resets: [] } },
+        },
+        null,
+        2
+      ),
+      'utf8'
+    );
+
+    const sentPayloads = [];
+    let pendingUpdates = [];
+    const fakeFetch = async (url, opts) => {
+      const method = url.split('/').pop();
+      const body = opts?.body ? JSON.parse(opts.body) : {};
+      if (method === 'sendMessage') {
+        sentPayloads.push(body);
+        return {
+          ok: true,
+          json: async () => ({ ok: true, result: { message_id: 100 + sentPayloads.length } }),
+        };
+      }
+      if (method === 'answerCallbackQuery') {
+        return { ok: true, json: async () => ({ ok: true, result: true }) };
+      }
+      if (method === 'getUpdates') {
+        const batch = pendingUpdates;
+        pendingUpdates = [];
+        return { ok: true, json: async () => ({ ok: true, result: batch }) };
+      }
+      return { ok: true, json: async () => ({ ok: true, result: {} }) };
+    };
+
+    const envOverride = {
+      TELEGRAM_BOT_TOKEN: '123456:FAKE_TOKEN',
+      TELEGRAM_CHAT_ID: '99887766',
+    };
+
+    const sendRes = await sendEscalationTelegram({
+      repoRoot: tmpRepo,
+      projectName: 'Demo-SaaS',
+      taskId: 'task-8',
+      threadKey: 'task-8-plan',
+      mode: 'plan',
+      reason: 'Bế tắc ở P0-01 sau 3 vòng',
+      budget: [{ provider: 'chatgpt', used: 3, max: 3, bonus: 0 }],
+      openIssues: { chatgpt: [{ id: 'P0-01', title: 'Thiếu xác thực webhook chữ ký Stripe' }] },
+      envOverride,
+      fetchImpl: fakeFetch,
+    });
+    assert.equal(sendRes.sent, true);
+    assert.ok(sendRes.plainText.includes('Tích hợp thanh toán Stripe'));
+    assert.ok(sendRes.plainText.includes('Thiếu xác thực webhook chữ ký Stripe'));
+
+    // Giả lập bấm nút từ người lạ (sai chat_id) + sai nonce -> bị bỏ qua, sau đó đúng chat_id bấm override
+    pendingUpdates = [
+      {
+        update_id: 10,
+        callback_query: {
+          id: 'cb-stranger',
+          message: { chat: { id: 111111 } },
+          data: `esc:${sendRes.nonce}:override`,
+        },
+      },
+      {
+        update_id: 11,
+        callback_query: {
+          id: 'cb-old-nonce',
+          message: { chat: { id: 99887766 } },
+          data: 'esc:wrongnonce:override',
+        },
+      },
+      {
+        update_id: 12,
+        callback_query: {
+          id: 'cb-valid',
+          message: { chat: { id: 99887766 } },
+          data: `esc:${sendRes.nonce}:override`,
+        },
+      },
+    ];
+
+    const decision = await waitForTelegramDecision({
+      repoRoot: tmpRepo,
+      timeoutMs: 5000,
+      pollIntervalMs: 10,
+      envOverride,
+      fetchImpl: fakeFetch,
+    });
+    assert.equal(decision.action, 'override');
+    assert.equal(decision.exitCode, DECISION_EXIT_CODES.OVERRIDE);
+
+    const feedbackAfter = fs.readFileSync(
+      path.join(tmpRepo, '.agents', 'state', 'MENTOR_FEEDBACK.md'),
+      'utf8'
+    );
+    assert.ok(feedbackAfter.startsWith('STATUS: APPROVED'));
+    assert.ok(feedbackAfter.includes('HUMAN_OVERRIDE: true'));
+
+    const techDebtAfter = fs.readFileSync(
+      path.join(tmpRepo, '.agents', 'state', 'TECH_DEBT.md'),
+      'utf8'
+    );
+    assert.ok(techDebtAfter.includes('Thiếu xác thực webhook chữ ký Stripe'));
+
+    passed += 1;
+    console.log('[PASS] RP-14: Telegram 2-Way Escalation (xác thực chat_id + nonce, nút Override đẩy P0 sang TECH_DEBT.md & khóa hash)');
+  } finally {
+    fs.rmSync(tmpRepo, { recursive: true, force: true });
+  }
+})();
 
 console.log(`\n=== TỔNG KẾT REVIEW POLICY v2: ${passed}/${passed} PASS ===`);
