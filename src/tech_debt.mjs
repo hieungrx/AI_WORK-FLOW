@@ -22,7 +22,14 @@ function sleepSync(ms) {
 /**
  * Kiểm tra tính hợp lệ của cấu hình khóa tệp ([P1-05]).
  *
- * @param {{ timeoutMs?: number, retryMinMs?: number, retryMaxMs?: number, holdDelayMs?: number }} [options={}]
+ * @param {{
+ *   timeoutMs?: number,
+ *   retryMinMs?: number,
+ *   retryMaxMs?: number,
+ *   holdDelayMs?: number,
+ *   _unlinkSync?: (p: string) => void,
+ *   onReleaseError?: (releaseErr: Error, callbackErr: unknown) => void
+ * }} [options={}]
  */
 export function validateLockOptions(options = {}) {
   if (!options || typeof options !== 'object' || Array.isArray(options)) {
@@ -37,6 +44,11 @@ export function validateLockOptions(options = {}) {
       options.retryMaxMs === undefined ? DEFAULT_LOCK_OPTIONS.retryMaxMs : options.retryMaxMs,
     holdDelayMs:
       options.holdDelayMs === undefined ? DEFAULT_LOCK_OPTIONS.holdDelayMs : options.holdDelayMs,
+    _unlinkSync: options._unlinkSync === undefined ? fs.unlinkSync : options._unlinkSync,
+    onReleaseError:
+      options.onReleaseError === undefined || options.onReleaseError === null
+        ? null
+        : options.onReleaseError,
   };
 
   if (!Number.isInteger(cfg.timeoutMs) || cfg.timeoutMs < 0 || cfg.timeoutMs > 300_000) {
@@ -63,20 +75,70 @@ export function validateLockOptions(options = {}) {
       `INVALID_LOCK_OPTIONS: holdDelayMs phải là số nguyên trong đoạn [0, 60000] (nhận: ${cfg.holdDelayMs}).`
     );
   }
+  if (typeof cfg._unlinkSync !== 'function') {
+    throw new Error('INVALID_LOCK_OPTIONS: _unlinkSync phải là một hàm.');
+  }
+  if (cfg.onReleaseError !== null && typeof cfg.onReleaseError !== 'function') {
+    throw new Error('INVALID_LOCK_OPTIONS: onReleaseError phải là một hàm hoặc null.');
+  }
   return cfg;
 }
 
 /**
+ * Giải phóng tệp khóa với tối đa 3 lần thử cho các lỗi hệ thống tệp tạm thời (`EPERM`, `EBUSY`, `EACCES`).
+ * Không retry đối với lỗi I/O cứng (`EIO`, `ENOENT`, ...) ([P1-01], [P2-02]).
+ *
+ * @param {string} lockPath
+ * @param {(p: string) => void} unlinkFn
+ */
+function releaseLockFile(lockPath, unlinkFn = fs.unlinkSync) {
+  const maxAttempts = 3;
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    try {
+      unlinkFn(lockPath);
+      return;
+    } catch (unlinkErr) {
+      const code = unlinkErr && unlinkErr.code;
+      const isTransient = code === 'EPERM' || code === 'EBUSY' || code === 'EACCES';
+      if (isTransient && attempt < maxAttempts - 1) {
+        sleepSync(10);
+        continue;
+      }
+      const releaseErr = new Error(
+        `LOCK_RELEASE_FAILED: Không thể giải phóng tệp khóa "${lockPath}": ${
+          unlinkErr?.message || String(unlinkErr)
+        }`,
+        { cause: unlinkErr }
+      );
+      releaseErr.code = 'LOCK_RELEASE_FAILED';
+      releaseErr.lockPath = lockPath;
+      releaseErr.attempts = attempt + 1;
+      releaseErr.cause = unlinkErr;
+      throw releaseErr;
+    }
+  }
+}
+
+/**
  * Thực thi hàm đồng bộ `fn()` bên trong khóa độc quyền liên tiến trình gắn với `filePath`
- * theo giao thức Strict Mutual Exclusion (Phương án A — [P0-01], [P0-02], [P0-03], [P1-01], [P1-06], [P1-07]):
+ * theo giao thức Strict Mutual Exclusion + Fail-Closed Quarantine:
+ * - Chặn `AsyncFunction` trước khi lấy khóa ([P1-03]).
  * - Tạo khóa nguyên tử qua `fs.openSync(lockPath, 'wx')` trên hệ thống tệp cục bộ (POSIX / NTFS).
- * - Không tự động cướp hoặc xóa khóa của tiến trình khác theo tuổi tệp để loại bỏ hoàn toàn TOCTOU.
- * - Chỉ retry khi gặp `EEXIST`; các lỗi quyền truy cập (`EACCES`, `EPERM`, ...) được ném ngay lập tức.
+ * - Nếu `fn()` trả về `Promise`/`thenable` hoặc gây ngoại lệ khi phân loại (`instanceof Promise` / getter `.then`),
+ *   chuyển khóa sang trạng thái cách ly (`compromised: true`), KHÔNG giải phóng khóa và ném `ASYNC_LOCK_CALLBACK` ([P0-01]).
+ * - Xử lý tường minh lỗi giải phóng khóa (`LOCK_RELEASE_FAILED`) và bảo toàn tuyệt đối `callbackError` ([P1-01]).
  *
  * @template T
  * @param {string} filePath
  * @param {() => T} fn
- * @param {{ timeoutMs?: number, retryMinMs?: number, retryMaxMs?: number, holdDelayMs?: number }} [options={}]
+ * @param {{
+ *   timeoutMs?: number,
+ *   retryMinMs?: number,
+ *   retryMaxMs?: number,
+ *   holdDelayMs?: number,
+ *   _unlinkSync?: (p: string) => void,
+ *   onReleaseError?: (releaseErr: Error, callbackErr: unknown) => void
+ * }} [options={}]
  * @returns {T}
  */
 export function withFileLock(filePath, fn, options = {}) {
@@ -86,6 +148,17 @@ export function withFileLock(filePath, fn, options = {}) {
   if (typeof fn !== 'function') {
     throw new Error('INVALID_LOCK_CALLBACK: Tham số fn phải là một hàm đồng bộ.');
   }
+  if (
+    (fn.constructor && fn.constructor.name === 'AsyncFunction') ||
+    Object.prototype.toString.call(fn) === '[object AsyncFunction]'
+  ) {
+    const asyncErr = new Error(
+      'ASYNC_LOCK_CALLBACK: withFileLock chỉ hỗ trợ hàm đồng bộ; không được truyền AsyncFunction.'
+    );
+    asyncErr.code = 'ASYNC_LOCK_CALLBACK';
+    throw asyncErr;
+  }
+
   const cfg = validateLockOptions(options);
   const resolvedTarget = path.resolve(filePath);
   fs.mkdirSync(path.dirname(resolvedTarget), { recursive: true });
@@ -94,6 +167,7 @@ export function withFileLock(filePath, fn, options = {}) {
   const startMs = Date.now();
   const deadlineMs = startMs + cfg.timeoutMs;
   const token = crypto.randomUUID();
+  const createdAt = Date.now();
   let acquired = false;
 
   while (!acquired) {
@@ -103,7 +177,7 @@ export function withFileLock(filePath, fn, options = {}) {
       const payload = JSON.stringify({
         pid: process.pid,
         token,
-        createdAt: Date.now(),
+        createdAt,
       });
       try {
         fs.writeFileSync(fd, payload, 'utf8');
@@ -140,16 +214,105 @@ export function withFileLock(filePath, fn, options = {}) {
     }
   }
 
+  let callbackResult;
+  let callbackError = null;
+  let hasCallbackError = false;
+  let quarantineLock = false;
+
+  // Bước A: Thực thi fn()
   try {
     if (cfg.holdDelayMs > 0) {
       sleepSync(cfg.holdDelayMs);
     }
-    return fn();
-  } finally {
-    try {
-      fs.unlinkSync(lockPath);
-    } catch (_releaseErr) {}
+    callbackResult = fn();
+  } catch (err) {
+    hasCallbackError = true;
+    callbackError = err;
   }
+
+  // Bước B: Phân loại kết quả trả về trong vùng kiểm soát ngoại lệ riêng ([P0-01])
+  if (
+    !hasCallbackError &&
+    callbackResult !== null &&
+    (typeof callbackResult === 'object' || typeof callbackResult === 'function')
+  ) {
+    let isAsyncOrSuspect = false;
+    try {
+      if (callbackResult instanceof Promise) {
+        isAsyncOrSuspect = true;
+        quarantineLock = true;
+        try {
+          Promise.prototype.catch.call(callbackResult, () => {});
+        } catch (_ignore) {}
+        try {
+          callbackResult.catch(() => {});
+        } catch (_ignore) {}
+      } else {
+        const thenProp = callbackResult.then;
+        if (typeof thenProp === 'function') {
+          isAsyncOrSuspect = true;
+          quarantineLock = true;
+        }
+      }
+    } catch (_classifyErr) {
+      isAsyncOrSuspect = true;
+      quarantineLock = true;
+    }
+
+    if (isAsyncOrSuspect) {
+      quarantineLock = true;
+      try {
+        writeFileAtomic(
+          lockPath,
+          JSON.stringify({
+            pid: process.pid,
+            token,
+            createdAt,
+            compromised: true,
+            reason: 'ASYNC_LOCK_CALLBACK',
+          })
+        );
+      } catch (_writeQuarantineErr) {
+        // Nếu cập nhật nguyên tử thất bại, tệp lockPath gốc vẫn còn nguyên vẹn trên đĩa và quarantineLock vẫn = true
+      }
+      const asyncErr = new Error(
+        'ASYNC_LOCK_CALLBACK: Callback của withFileLock trả về Promise/thenable (hoặc đối tượng không an toàn); tệp khóa đã được cách ly (quarantine) để ngăn Lost Update.'
+      );
+      asyncErr.code = 'ASYNC_LOCK_CALLBACK';
+      asyncErr.quarantinedLockPath = lockPath;
+      hasCallbackError = true;
+      callbackError = asyncErr;
+    }
+  }
+
+  let releaseError = null;
+  if (!quarantineLock) {
+    try {
+      releaseLockFile(lockPath, cfg._unlinkSync);
+    } catch (relErr) {
+      releaseError = relErr;
+      if (cfg.onReleaseError) {
+        try {
+          cfg.onReleaseError(releaseError, hasCallbackError ? callbackError : null);
+        } catch (_hookErr) {}
+      }
+    }
+  }
+
+  if (hasCallbackError) {
+    if (releaseError && callbackError && typeof callbackError === 'object') {
+      try {
+        callbackError.releaseError = releaseError;
+      } catch (_frozenErr) {}
+    }
+    throw callbackError;
+  }
+
+  if (releaseError) {
+    throw releaseError;
+  }
+
+  return callbackResult;
 }
 
 /**
@@ -171,13 +334,14 @@ function isProcessAlive(pid) {
 }
 
 /**
- * Công cụ bảo trì ngoại tuyến: thu hồi tệp `.lock` bị bỏ rơi sau khi tiến trình giữ khóa bị crash cưỡng bức.
+ * Công cụ bảo trì ngoại tuyến: thu hồi tệp `.lock` bị bỏ rơi (hoặc bị cách ly `compromised: true`)
+ * sau khi tiến trình giữ khóa đã thực sự kết thúc (`ESRCH`).
  * - Chỉ được gọi khi toàn bộ Worker đang dừng hoạt động.
- * - Nếu payload khóa bị hỏng hoặc không có `pid` hợp lệ -> ném `CORRUPT_LOCK_PAYLOAD` (yêu cầu kiểm tra thủ công).
- * - Nếu `pid` vẫn còn sống -> ném `LOCK_OWNER_ALIVE` và giữ nguyên tệp khóa.
+ * - Nếu payload khóa bị hỏng hoặc không có `pid` hợp lệ -> ném `CORRUPT_LOCK_PAYLOAD`.
+ * - Nếu `pid` vẫn còn sống -> luôn luôn ném `LOCK_OWNER_ALIVE` và giữ nguyên tệp khóa (kể cả khi `compromised: true`) ([NEW-P0-01]).
  *
  * @param {string} filePath
- * @returns {{ recovered: boolean, deadPid: number | null, token: string }}
+ * @returns {{ recovered: boolean, deadPid: number | null, token: string, compromised: boolean }}
  */
 export function recoverOrphanedLock(filePath) {
   if (typeof filePath !== 'string' || !filePath.trim()) {
@@ -186,7 +350,7 @@ export function recoverOrphanedLock(filePath) {
   const resolvedTarget = path.resolve(filePath);
   const lockPath = `${resolvedTarget}.lock`;
   if (!fs.existsSync(lockPath)) {
-    return { recovered: false, deadPid: null, token: '' };
+    return { recovered: false, deadPid: null, token: '', compromised: false };
   }
 
   let parsed = null;
@@ -201,6 +365,7 @@ export function recoverOrphanedLock(filePath) {
 
   const pid = Number(parsed?.pid);
   const token = typeof parsed?.token === 'string' ? parsed.token : '';
+  const compromised = Boolean(parsed?.compromised);
   if (!Number.isInteger(pid) || pid <= 0) {
     throw new Error(
       `CORRUPT_LOCK_PAYLOAD: Tệp khóa "${lockPath}" không chứa PID nguyên dương hợp lệ.`
@@ -214,7 +379,7 @@ export function recoverOrphanedLock(filePath) {
   }
 
   fs.unlinkSync(lockPath);
-  return { recovered: true, deadPid: pid, token };
+  return { recovered: true, deadPid: pid, token, compromised };
 }
 
 const normalizeNewlines = (text) => String(text ?? '').replace(/\r\n/g, '\n');

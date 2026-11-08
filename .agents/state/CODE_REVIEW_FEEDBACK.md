@@ -6,50 +6,99 @@ BLOCKING (P0)
 
 NON-BLOCKING (P1/P2)
 
-[P1-01] Lỗi giải phóng khóa bị bỏ qua âm thầm — Trong src/tech_debt.mjs, withFileLock() sử dụng finally để gọi fs.unlinkSync(lockPath) nhưng bỏ qua mọi lỗi. Nếu việc xóa khóa thất bại, tệp .lock có thể tồn tại và các Worker tiếp theo liên tục nhận LOCK_TIMEOUT. Cần xử lý và ghi nhận lỗi giải phóng khóa, bảo toàn lỗi gốc nếu callback đã thất bại, đồng thời bổ sung kiểm thử mô phỏng unlinkSync thất bại. 
-review_bundle_1794095433378_23228.txt
+- [P1-01] Lỗi giải phóng khóa có thể bị che khuất khi callback đồng thời thất bại — src/tech_debt.mjs, đoạn withFileLock() xử lý releaseError: nếu callbackError là đối tượng đóng băng (Object.freeze()), việc gắn thuộc tính releaseError thất bại và bị bỏ qua. Nếu không cấu hình onReleaseError, lỗi giải phóng khóa không được báo cáo riêng, gây khó khăn cho việc phát hiện khóa còn tồn tại. Đề xuất: bổ sung cơ chế ghi nhận lỗi độc lập hoặc trả về AggregateError trong chế độ chẩn đoán, đồng thời giữ nguyên hợp đồng ưu tiên lỗi callback.
 
-[P1-02] Chưa có kiểm thử crash thực tế của tiến trình giữ khóa — TD-12 kiểm tra recoverOrphanedLock() bằng PID giả định đã chết, nhưng chưa kiểm tra chu trình tiến trình thực sự bị kill, để lại khóa, sau đó phục hồi ngoại tuyến. Nên bổ sung regression test sử dụng child process thực, xác nhận không xóa khóa khi chủ sở hữu còn sống và khôi phục đúng sau khi tiến trình kết thúc. 
-review_bundle_1794095433378_23228.txt
+- [P1-02] Thiếu cơ chế xác minh quyền sở hữu trước khi giải phóng khóa — releaseLockFile() gọi unlinkFn(lockPath) mà không đối chiếu token của tiến trình sở hữu. Theo giao thức hiện tại, việc này an toàn khi không có tác nhân bên ngoài thay thế tệp .lock. Tuy nhiên, nếu tệp bị thay thế ngoài giao thức, tiến trình cũ có thể xóa khóa mới. Đề xuất: xác định rõ giả định không có tác nhân can thiệp ngoài giao thức và bổ sung kiểm thử thay thế khóa; nếu cần hỗ trợ tình huống này, thiết kế cơ chế xác thực ownership an toàn trước khi unlink.
 
-[P1-03] Chưa kiểm soát callback bất đồng bộ — withFileLock() được thiết kế cho callback đồng bộ, nhưng không từ chối callback trả về Promise. Nếu sử dụng sai API, khóa được giải phóng trước khi thao tác bất đồng bộ hoàn tất, tạo nguy cơ Lost Update. Nên kiểm tra thenable và fail-fast, đồng thời ghi rõ hợp đồng API. 
-review_bundle_1794095433378_23228.txt
+- [P1-03] Kiểm thử tiến trình con chưa bảo đảm cleanup đầy đủ trong mọi nhánh thất bại — tests/tech_debt.test.mjs, TD-14 và TD-16: một số tiến trình được spawn nhưng không được quản lý tập trung để kill và reap khi assertion hoặc barrier thất bại. Điều này có thể để lại tiến trình hoặc tài nguyên sau khi test lỗi. Đề xuất: quản lý danh sách child processes, cleanup trong finally, giới hạn thời gian chờ và xác nhận toàn bộ tiến trình đã thoát.
 
-[P2-01] Cần mở rộng kiểm thử concurrency — TD-11 đã kiểm tra 5 tiến trình append và 4 tiến trình resolve, nhưng thực hiện thành hai giai đoạn riêng biệt. Nên bổ sung kịch bản append và resolve chạy xen kẽ trên cùng tệp, lặp lại nhiều lần để tăng khả năng phát hiện lỗi phụ thuộc timing. 
-review_bundle_1794095433378_23228.txt
+- [P2-01] Cơ chế nhận diện AsyncFunction phụ thuộc vào introspection — fn.constructor.name và Object.prototype.toString.call(fn) có thể bị thay đổi bởi Proxy hoặc custom properties. Kết quả trả về vẫn được kiểm tra sau khi callback chạy, nhưng bước preflight chưa hoàn toàn đáng tin cậy. Đề xuất: coi preflight là tối ưu hóa phát hiện sớm, không phải ranh giới bảo mật; bổ sung kiểm thử Proxy và custom constructor.
 
-KẾT QUẢ NGHIỆM THU
+- [P2-02] Chưa có kiểm thử lặp nhiều lần cho concurrency — TD-11, TD-15 và TD-16 đã bao phủ các tình huống đa tiến trình, crash và tranh chấp hỗn hợp. Tuy nhiên, kết quả được cung cấp mới thể hiện một lần chạy. Đề xuất: bổ sung stress test chạy lặp trong CI để tăng khả năng phát hiện race condition và lỗi timing không ổn định.
 
-Tests báo cáo
-
-13/13
-
+KẾT QUẢ ĐỐI CHIẾU
+Tests được báo cáo
+16/16
 Exit code
-
 0
-
 P0 còn mở
-
 0
 
-Đã đối chiếu nội dung báo cáo kiểm thử, git diff và mã nguồn test trong bundle đính kèm. Chưa chạy npm test độc lập trong repository thực tế.
+Nguồn: log npm test và git diff trong review bundle được cung cấp. Chưa thực thi lại trên repository gốc.
 
-Các tiêu chí chính được đáp ứng theo bằng chứng cung cấp:
+Hạng mục
 
-Khóa được tạo bằng fs.openSync(lockPath, 'wx'), không sử dụng stale-lock takeover tự động.
+	
 
-appendTechDebt() và resolveTechDebt() thực hiện read-modify-write bên trong vùng khóa.
+Kết quả
 
-TD-11 kiểm tra tranh chấp đa tiến trình, số lượng bản ghi cuối cùng và trạng thái resolve.
 
-TD-12 kiểm tra timeout, bảo vệ chủ khóa và một số trường hợp phục hồi.
 
-TD-13 kiểm tra luồng ingest → resolve → summarize.
+
+Từ chối callback async
+
+	
+
+Đạt theo code và test TD-14
+
+
+
+
+Fail-Closed Quarantine
+
+	
+
+Đạt theo TD-14
+
+
+
+
+Retry khi giải phóng khóa
+
+	
+
+Đạt theo TD-14
+
+
+
+
+Bảo toàn callback error
+
+	
+
+Đạt theo TD-14, còn hạn chế quan sát lỗi phụ
+
+
+
+
+Crash Recovery / SIGKILL
+
+	
+
+Đạt theo TD-15
+
+
+
+
+Concurrency append/resolve
+
+	
+
+Đạt theo TD-16
+
+
+
+
+Kiểm thử độc lập trên repo
+
+	
+
+Chưa xác minh
 
 GATE DECISION
 
-APPROVED — Cho phép tiếp tục quy trình RPIR Task 2.
+Task 3 được chấp thuận theo phạm vi mã nguồn và bằng chứng đã cung cấp.
 
-Không phát hiện P0 còn mở trong phạm vi mã nguồn và bằng chứng đã cung cấp. Các vấn đề P1/P2 không chặn Gate theo quy tắc đã chỉ định.
+Không phát hiện lỗi P0 còn mở trong phần diff đã kiểm tra. Những vấn đề P1/P2 nêu trên không chặn triển khai theo quy tắc Severity Gate của RPIR.
 
-Giới hạn: Đây là kết luận review dựa trên bundle, chưa phải xác nhận thực thi độc lập hoặc đối chiếu đầy đủ với CURRENT_PLAN.md đã phê duyệt. Các finding P1 nên được ghi vào TECH_DEBT.md để theo dõi và xử lý ở vòng tiếp theo.
+Có thể chuyển sang bước cập nhật HANDOFF.md và TECH_DEBT.md, nhưng cần lưu lại các finding chưa xử lý. Kết luận này không đồng nghĩa đã chứng minh hệ thống an toàn trong mọi tình huống can thiệp tệp khóa hoặc đã kiểm chứng runtime độc lập.

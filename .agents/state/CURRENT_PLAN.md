@@ -1,113 +1,166 @@
-# CURRENT_PLAN: Task 2 (v1.1) — Khóa Tệp Liên Tiến Trình (`withFileLock`) Chống Lost Update & Kiểm Thử Tích Hợp End-to-End (`[P1-01]`, `[P1-02]`)
+# CURRENT_PLAN: Task 3 (v1.2) — Hoàn Thiện Bảo Vệ `withFileLock` (Fail-Closed Quarantine Tuyệt Đối `[P0-01]`, `[NEW-P0-01]` & Xử Lý Lỗi Giải Phóng Khóa `[P1-01]`) + Kiểm Thử Crash & Concurrency Xen Kẽ
 
-## 1. Bối cảnh, Mục tiêu & Phạm vi Bảo đảm
-Ở **Task 1**, cả hai chuyên gia Mentor (`@Software System Architect` và `@Independent QA & Gate Reviewer`) đã phê duyệt module `src/tech_debt.mjs` và ghi nhận 2 hạng mục kỹ thuật cần hoàn thiện ở **Task 2**:
-1. **`[P1-02]` — Chống Lost Update khi nhiều tiến trình Worker ghi đồng thời vào `TECH_DEBT.md`**:
-   - Bọc toàn bộ chu trình **Read → Modify → Write** của `appendTechDebt()` và `resolveTechDebt()` trong khóa độc quyền liên tiến trình `withFileLock(filePath, fn, options)`.
-2. **`[P1-01]` — Xác minh tích hợp thực tế với luồng Review trong bộ bằng chứng `src/` & `tests/`**:
-   - Đưa hàm điều phối tiếp nhận báo cáo Mentor và trích xuất nợ kỹ thuật (`ingestMentorTechDebtReport`) vào `src/tech_debt.mjs` (được `.agents/scripts/review_policy.mjs` gọi trực tiếp) để toàn bộ hợp đồng tích hợp nằm trong phạm vi `src/` và `tests/` mà `review_bundle` gửi cho QA Reviewer.
-
-**Phạm vi hệ thống tệp (`[P1-07]`)**:
-- `withFileLock` sử dụng cơ chế tạo tệp độc quyền nguyên tử của nhân hệ điều hành (`fs.openSync(lockPath, 'wx')` — `O_CREAT | O_EXCL`), được thiết kế và bảo đảm tính loại trừ tương hỗ (Mutual Exclusion) cho **hệ thống tệp cục bộ (Local POSIX / Windows NTFS)** nơi các Worker Agent chạy trên cùng máy trạm. Không áp dụng cho các hệ thống tệp mạng không hỗ trợ `O_EXCL` nguyên tử (như NFSv3/SMB cũ).
+## 1. Bối cảnh, Mục tiêu & Giới hạn Hợp đồng
+Sau khi hoàn thành **Task 1** và **Task 2**, **Task 3 (v1.2)** giải quyết toàn bộ các hạng mục kỹ thuật còn lại của `src/tech_debt.mjs` và `tests/tech_debt.test.mjs`, đặc biệt khắc phục triệt để 2 điểm chặn `[P0-01]` và `[NEW-P0-01]` theo phản hồi Vòng 2 của `@Software System Architect`:
+1. **`[P0-01]` — Nhận diện `Promise` / `thenable` trong vùng kiểm soát ngoại lệ riêng (Đặt `quarantineLock = true` TRƯỚC mọi thao tác có thể ném lỗi)**:
+   - Tách hoàn toàn bước thực thi `fn()` và bước kiểm tra kết quả `callbackResult` thành 2 khối `try/catch` độc lập.
+   - Khi kiểm tra `callbackResult`:
+     - Nếu `callbackResult instanceof Promise`: **đặt `quarantineLock = true` ngay lập tức**, sau đó mới thực hiện gắn handler chống unhandled rejection theo cơ chế best-effort (`try { Promise.prototype.catch.call(callbackResult, () => {}); } catch (_ignore) {}`). Kể cả khi `.catch` bị ghi đè và ném lỗi đồng bộ, `quarantineLock` đã là `true` nên khóa không bao giờ bị giải phóng sớm.
+     - Nếu `callbackResult` là object/function khác: đọc thuộc tính `callbackResult.then` trong một khối `try/catch` riêng. Nếu `typeof thenProp === 'function'` **HOẶC nếu chính getter `callbackResult.then` ném ngoại lệ đồng bộ**, lập tức đặt **`quarantineLock = true`** và chuyển sang trạng thái cách ly khóa.
+2. **`[NEW-P0-01]` — Loại bỏ hoàn toàn `forceCompromised`, cấm thu hồi khóa `compromised` khi PID sở hữu còn sống**:
+   - Không cung cấp bất kỳ cờ boolean nào (như `forceCompromised`) cho phép xóa khóa khi tiến trình giữ khóa vẫn còn sống.
+   - `recoverOrphanedLock(filePath)` áp dụng bất biến an toàn tuyệt đối: **Nếu `isProcessAlive(pid) === true`, luôn luôn ném `LOCK_OWNER_ALIVE` và giữ nguyên tệp khóa** (bất kể khóa thường hay khóa `compromised: true`). Khóa cách ly chỉ được thu hồi sau khi xác minh tiến trình `pid` đã kết thúc (`ESRCH`).
+3. **Giới hạn hợp đồng cần ghi rõ**:
+   - Cơ chế `AsyncFunction` pre-check và Fail-Closed Quarantine bảo vệ mọi trường hợp vi phạm hợp đồng có thể phát hiện được qua chữ ký hàm hoặc giá trị trả về (`AsyncFunction`, `Promise`, `thenable`, hoặc getter `.then` ném lỗi). Cơ chế này không thể tự động phát hiện một hàm đồng bộ khởi chạy tác vụ nền ngầm nhưng cố tình trả về giá trị nguyên thủy (`undefined`/`number`/`string`); do đó không tuyên bố loại bỏ tuyệt đối 100% mọi nguy cơ từ mã nguồn cố tình lách hợp đồng.
 
 ---
 
-## 2. Thiết kế Giao thức Khóa Tệp Nhất quán (Giải quyết Triệt để `[P0-01]`, `[P0-02]`, `[P0-03]`)
+## 2. Thiết kế Kỹ thuật Chi tiết (`src/tech_debt.mjs`)
 
-### 2.1. Quyết định Kiến trúc: Chọn Phương án A (Strict Mutual Exclusion — Không Tự động Cướp Khóa theo Thời gian)
-Theo phân tích của `@Software System Architect` ở Vòng 1:
-- Mọi cơ chế tự động thu hồi/cướp khóa dựa trên tuổi tệp (`staleMs`) mà không có nguyên tử CAS (Compare-And-Swap) cấp hệ thống tệp đều dẫn đến 3 lỗi P0:
-  - **`[P0-01]`**: Hai tiến trình B và C cùng phát hiện khóa của A quá hạn và cùng gọi `renameSync(lockPath, ...)`, khiến C di chuyển nhầm khóa mới vừa tạo của B -> cả B và C cùng vào vùng găng (Lost Update).
-  - **`[P0-02]`**: Tiến trình A còn sống nhưng bị OS tạm dừng hoặc I/O chậm quá ngưỡng `staleMs` sẽ bị tiến trình khác thu hồi khóa ngay khi A đang ở trong vùng găng.
-  - **`[P0-03]`**: Trong khối `finally`, việc đọc `token` rồi mới `unlinkSync`/`renameSync` vẫn có khoảng hở TOCTOU nếu tồn tại cơ chế cho phép tiến trình khác cướp khóa của chủ cũ.
-- **Giải pháp Kiến trúc (Phương án A)**:
-  1. **Loại bỏ hoàn toàn đường tự động cướp khóa theo thời gian (`staleMs`) khỏi `withFileLock()`**:
-     - Trong `withFileLock()`, khóa `lockPath` **chỉ được tạo bằng `fs.openSync(lockPath, 'wx')`** và **chỉ được xóa bởi chính tiến trình đã tạo thành công tệp khóa đó** trong khối `finally` của nó.
-     - Không có bất kỳ tiến trình chờ (waiter) nào được phép `unlinkSync` hoặc `renameSync` tệp `lockPath` đang tồn tại.
-     - **Hệ quả chứng minh tính loại trừ tương hỗ (Mutual Exclusion Proof)**:
-       - *Giải quyết `[P0-01]`*: Không tồn tại thao tác `renameSync`/`unlinkSync` cạnh tranh từ các waiter B, C lên `lockPath`. Chỉ duy nhất 1 tiến trình thắng `openSync(lockPath, 'wx')` mới sở hữu khóa tại một thời điểm.
-       - *Giải quyết `[P0-02]`*: Tiến trình A đang giữ khóa dù chạy lâu hay bị OS tạm dừng cũng **không bao giờ bị tước khóa** khi chưa kết thúc `fn()` và `finally`. Các tiến trình chờ nếu vượt quá `timeoutMs` sẽ thất bại an toàn (`LOCK_TIMEOUT`) mà không chạm vào khóa hay dữ liệu của A.
-       - *Giải quyết `[P0-03]`*: Vì không có tiến trình nào khác được phép thay thế `lockPath` trong suốt thời gian A giữ khóa, tệp `lockPath` tại thời điểm A chạy khối `finally` **chắc chắn 100% vẫn là tệp khóa do chính A tạo ra**. Không tồn tại kịch bản A xóa nhầm khóa của B.
-  2. **Cơ chế Khôi phục Ngoại tuyến An toàn khi Tiến trình Crash (`recoverOrphanedLock`)**:
-     - Trường hợp hiếm gặp khi tiến trình giữ khóa bị dừng cưỡng bức (`SIGKILL` / mất điện) để lại tệp `.lock` mồ côi được xử lý qua hàm quản trị ngoại tuyến tường minh `recoverOrphanedLock(filePath)`:
-     - Hàm này đọc `{ pid, token, createdAt }` từ `lockPath` và kiểm tra trạng thái sống của tiến trình `pid` qua `isProcessAlive(pid)` (`process.kill(pid, 0)`):
-       - Nếu `process.kill(pid, 0)` thành công hoặc ném `EPERM` -> tiến trình giữ khóa **vẫn còn sống** -> từ chối thu hồi và ném lỗi `LOCK_OWNER_ALIVE` (bảo vệ tuyệt đối tiến trình đang chạy).
-       - Chỉ khi `process.kill(pid, 0)` ném `ESRCH` (*No such process* — tiến trình giữ khóa chắc chắn đã chết) và được gọi ngoại tuyến khi không có Worker đang chạy, hàm mới dọn tệp `.lock` mồ côi.
+### 2.1. Giao thức Fail-Closed Quarantine cho `AsyncFunction` & `Thenable` (`[P0-01]`, `[NEW-P0-01]`, `[P1-03]`)
+1. **Kiểm tra `AsyncFunction` trước khi lấy khóa (Pre-Acquisition Check)**:
+   - Trước khi gọi `fs.openSync(lockPath, 'wx')`:
+     ```js
+     if (
+       fn.constructor?.name === 'AsyncFunction' ||
+       Object.prototype.toString.call(fn) === '[object AsyncFunction]'
+     ) {
+       const asyncErr = new Error(
+         'ASYNC_LOCK_CALLBACK: withFileLock chỉ hỗ trợ hàm đồng bộ; không được truyền AsyncFunction.'
+       );
+       asyncErr.code = 'ASYNC_LOCK_CALLBACK';
+       throw asyncErr;
+     }
+     ```
+2. **Tách biệt vùng thực thi `fn()` và vùng kiểm tra `callbackResult` (`[P0-01]`)**:
+   ```js
+   let callbackResult;
+   let callbackError = null;
+   let hasCallbackError = false;
+   let quarantineLock = false;
 
-### 2.2. Hợp đồng Validate Tham số Khóa (`validateLockOptions` — `[P1-05]`)
-```js
-export const DEFAULT_LOCK_OPTIONS = Object.freeze({
-  timeoutMs: 5000,   // Thời gian chờ tối đa để lấy khóa (số nguyên >= 0)
-  retryMinMs: 10,    // Khoảng chờ tối thiểu giữa các lần thử lại (số nguyên >= 1)
-  retryMaxMs: 30,    // Khoảng chờ tối đa (số nguyên >= retryMinMs)
-  holdDelayMs: 0,    // Chỉ dùng cho kiểm thử tranh chấp có kiểm soát (số nguyên >= 0)
-});
-```
-- Hàm `validateLockOptions(options = {})`:
-  - Kiểm tra `timeoutMs`, `retryMinMs`, `retryMaxMs`, `holdDelayMs` phải là các số nguyên hữu hạn (`Number.isInteger`), thỏa mãn:
-    - `timeoutMs >= 0 && timeoutMs <= 300_000`
-    - `retryMinMs >= 1 && retryMinMs <= 10_000`
-    - `retryMaxMs >= retryMinMs && retryMaxMs <= 10_000`
-    - `holdDelayMs >= 0 && holdDelayMs <= 60_000`
-  - Nếu vi phạm bất kỳ điều kiện nào -> ném lỗi ngay lập tức: `new Error('INVALID_LOCK_OPTIONS: ...')`.
+   // Bước A: Thực thi fn()
+   try {
+     if (cfg.holdDelayMs > 0) {
+       sleepSync(cfg.holdDelayMs);
+     }
+     callbackResult = fn();
+   } catch (err) {
+     hasCallbackError = true;
+     callbackError = err;
+   }
 
-### 2.3. Chi tiết Vòng đời `withFileLock(filePath, fn, options = {})` (`[P1-01]`, `[P1-06]`)
-1. **Validate đầu vào**:
-   - Kiểm tra `filePath` không rỗng, `typeof fn === 'function'`, và gọi `validateLockOptions(options)`.
-2. **Khởi tạo khóa nguyên tử & Cleanup khi lỗi ghi Payload (`[P1-06]`)**:
-   - `const resolvedTarget = path.resolve(String(filePath));`
-   - `fs.mkdirSync(path.dirname(resolvedTarget), { recursive: true });`
-   - `const lockPath = `${resolvedTarget}.lock`;`
-   - Vòng lặp lấy khóa:
-     - Thử gọi `const fd = fs.openSync(lockPath, 'wx');`
-     - Ngay khi `openSync` thành công, tiến trình hiện tại là **chủ sở hữu duy nhất** của `lockPath`.
-     - Thực hiện ghi JSON payload `{ pid: process.pid, token, createdAt: Date.now() }` vào `fd` trong khối `try`:
-       - Nếu `fs.writeFileSync(fd, payload, 'utf8')` (hoặc `fs.closeSync(fd)`) bị lỗi đĩa đầy / I/O error: đóng `fd` (nếu còn mở), **xóa ngay `fs.unlinkSync(lockPath)`** trong `catch` trước khi ném lại lỗi để không bao giờ để lại tệp `.lock` rỗng/hỏng (`[P1-06]`).
-3. **Phân loại lỗi chính xác khi mở khóa (`[P1-01]`)**:
-   - Chỉ coi **`err.code === 'EEXIST'`** là trạng thái khóa đang bận (contention) để chờ và thử lại.
-   - Nếu `openSync` ném các lỗi hệ thống/quyền truy cập thực sự (`EACCES`, `EPERM`, `ENOENT`, `EISDIR`, `EROFS`...), **ném thẳng lỗi gốc ngay lập tức** chứ tuyệt đối không retry và không biến thành `LOCK_TIMEOUT`.
-4. **Chờ có Jitter & Hết thời gian chờ (`LOCK_TIMEOUT`)**:
-   - Khi gặp `EEXIST`:
-     - Nếu `Date.now() - startMs >= timeoutMs`: ném lỗi `new Error(\`LOCK_TIMEOUT: Không thể lấy khóa tệp "${lockPath}" sau ${timeoutMs}ms.\`)`.
-     - Tính `delayMs = Math.min( rawJitter, Math.max(1, deadlineMs - Date.now()) )` và ngủ đồng bộ qua `Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delayMs)`.
-5. **Thực thi vùng găng & Giải phóng khóa an toàn trong `finally`**:
-   - Khi đã giữ khóa: nếu `holdDelayMs > 0` (chế độ test tranh chấp), ngủ `holdDelayMs` trước khi gọi `fn()`.
-   - Trong `finally`:
-     - Vì chỉ chủ khóa duy nhất mới có quyền xóa `lockPath` (không có cơ chế cướp khóa tự động), gọi `fs.unlinkSync(lockPath)` để giải phóng khóa nguyên tử.
+   // Bước B: Kiểm tra kết quả trả về trong vùng kiểm soát ngoại lệ riêng (chỉ khi fn() đã trả về)
+   if (!hasCallbackError && callbackResult !== null && (typeof callbackResult === 'object' || typeof callbackResult === 'function')) {
+     let isAsyncOrSuspect = false;
+     try {
+       if (callbackResult instanceof Promise) {
+         isAsyncOrSuspect = true;
+         quarantineLock = true;
+         try {
+           Promise.prototype.catch.call(callbackResult, () => {});
+         } catch (_ignore) {}
+         try {
+           callbackResult.catch(() => {});
+         } catch (_ignore) {}
+       } else {
+         const thenProp = callbackResult.then;
+         if (typeof thenProp === 'function') {
+           isAsyncOrSuspect = true;
+           quarantineLock = true;
+         }
+       }
+     } catch (_classifyErr) {
+       // Bắt cả ngoại lệ từ Proxy getPrototypeOf trap (khi chạy instanceof Promise) lẫn getter .then ([P0-01])
+       isAsyncOrSuspect = true;
+       quarantineLock = true;
+     }
 
-### 2.4. Tích hợp End-to-End với Luồng Review (`ingestMentorTechDebtReport` — `[P1-04]`)
-- Bổ sung hàm `ingestMentorTechDebtReport(filePath, report, meta = {}, now = new Date())` ngay trong `src/tech_debt.mjs`:
-  - Nhận đối tượng báo cáo mức độ (`{ p1: [...], p2: [...] }`) từ bộ phân tích phản hồi Mentor, tự động gắn nhãn `level: 'P1' | 'P2'`, hợp nhất danh sách và gọi `appendTechDebt(filePath, combined, meta, now)` dưới sự bảo vệ của `withFileLock`.
-  - Cập nhật `.agents/scripts/review_policy.mjs` để re-export `withFileLock`, `recoverOrphanedLock`, `ingestMentorTechDebtReport` từ `src/tech_debt.mjs`. Nhờ đó, toàn bộ logic tích hợp nằm trong `src/tech_debt.mjs` và được kiểm증 đầy đủ trong `review_bundle` gửi cho QA Reviewer.
+     if (isAsyncOrSuspect) {
+       quarantineLock = true;
+       try {
+         fs.writeFileSync(
+           lockPath,
+           JSON.stringify({
+             pid: process.pid,
+             token,
+             createdAt: Date.now(),
+             compromised: true,
+             reason: 'ASYNC_LOCK_CALLBACK',
+           }),
+           'utf8'
+         );
+       } catch (_writeQuarantineErr) {
+         // Best-effort: kể cả ghi metadata lỗi thì tệp lockPath gốc vẫn còn trên đĩa và quarantineLock vẫn = true
+       }
+       const asyncErr = new Error(
+         'ASYNC_LOCK_CALLBACK: Callback của withFileLock trả về Promise/thenable (hoặc getter .then không an toàn); tệp khóa đã được chuyển sang trạng thái cách ly (quarantine) để ngăn Lost Update.'
+       );
+       asyncErr.code = 'ASYNC_LOCK_CALLBACK';
+       asyncErr.quarantinedLockPath = lockPath;
+       hasCallbackError = true;
+       callbackError = asyncErr;
+     }
+   }
+   ```
+   - **Đảm bảo `[P0-01]`**:
+     - Khi `quarantineLock === true`, bước giải phóng khóa `releaseLockFile(lockPath)` bị **bỏ qua hoàn toàn**.
+     - Dù `.catch` của Promise bị ghi đè và ném lỗi đồng bộ, hay getter `.then` của đối tượng trả về ném lỗi đồng bộ, `quarantineLock` luôn được gán `= true` trước và tệp `.lock` tuyệt đối không bị xóa.
+3. **Bảo vệ khóa cách ly trong `recoverOrphanedLock(filePath)` (`[NEW-P0-01]`)**:
+   - Không có bất kỳ tham số `forceCompromised` nào.
+   - Quy trình `recoverOrphanedLock(filePath)`:
+     1. Đọc và kiểm tra JSON `{ pid, token, createdAt, compromised }` từ `lockPath` (nếu JSON hỏng hoặc `pid` không phải số nguyên dương -> ném `CORRUPT_LOCK_PAYLOAD`).
+     2. Kiểm tra `if (isProcessAlive(pid))`:
+        - **Luôn luôn ném lỗi `LOCK_OWNER_ALIVE`** (kể cả khi `compromised === true`), giữ nguyên tệp `.lock` trên đĩa.
+     3. Chỉ khi `isProcessAlive(pid) === false` (`ESRCH` — tiến trình giữ khóa đã thực sự kết thúc), mới gọi `fs.unlinkSync(lockPath)` và trả về `{ recovered: true, deadPid: pid, token, compromised: Boolean(parsed.compromised) }`.
+
+### 2.2. Xử lý Lỗi Giải phóng Khóa & Bảo toàn Tuyệt đối `callbackError` (`[P1-01]`, `[P1-02]`, `[P2-02]`)
+1. **Hỗ trợ `_unlinkSync` và `onReleaseError` trong `validateLockOptions`**:
+   - Cho phép truyền `options._unlinkSync` (mặc định `fs.unlinkSync`) và `options.onReleaseError` (mặc định `null`). Nếu truyền giá trị khác `undefined`/`null` mà không phải `function`, ném `INVALID_LOCK_OPTIONS`.
+2. **Hàm `releaseLockFile(lockPath, unlinkFn)`**:
+   - Chỉ được gọi khi `quarantineLock === false`.
+   - Thử gọi `unlinkFn(lockPath)` tối đa **3 lần**:
+     - Chỉ retry khi lỗi có `code === 'EPERM' || code === 'EBUSY' || code === 'EACCES'` (chờ `10ms` giữa các lần thử).
+     - Với lỗi không tạm thời (`EIO`, `ENOENT`, ...) hoặc khi hết 3 lần thử -> ném `releaseErr` (`code: 'LOCK_RELEASE_FAILED'`, `lockPath`, `attempts`, `cause`).
+3. **Bảo toàn `callbackError` ngay cả khi bị `Object.freeze()`**:
+   - Nếu xảy ra `releaseError`:
+     - Luôn thông báo qua `try { cfg.onReleaseError?.(releaseError, callbackError); } catch (_e) {}`.
+     - Nếu `hasCallbackError === true`: thử gán `callbackError.releaseError = releaseError` bên trong `try/catch` riêng (bỏ qua nếu `callbackError` bị `Object.freeze()`), rồi **luôn ném lại chính `callbackError`**.
+     - Nếu `hasCallbackError === false`: **ném trực tiếp `releaseError`**.
 
 ---
 
 ## 3. Kế hoạch Kiểm thử Chi tiết (`tests/tech_debt.test.mjs`)
 
-Giữ nguyên 10 bài kiểm thử `TD-1`..`TD-10` và bổ sung **3 bài kiểm thử mới** (`TD-11`, `TD-12`, `TD-13`):
-1. **`TD-11 [P1-02] & [P2-01]`: Kiểm thử tranh chấp thực tế đa tiến trình qua 2 giai đoạn (Tổng cộng 9 lượt tiến trình Worker độc lập)**:
-   - **Giai đoạn 1 (5 tiến trình `appendTechDebt` song song)**:
-     - Dùng `child_process.spawn` khởi chạy đồng thời **5 tiến trình Node.js** cùng chờ tại một rào cản khởi động (startup barrier file) rồi đồng loạt gọi `appendTechDebt()` vào cùng tệp `TECH_DEBT.md` với `lockOptions: { timeoutMs: 10000, holdDelayMs: 40 }` để **ép buộc xảy ra tranh chấp khóa thực sự (`EEXIST` retry)** giữa các tiến trình.
-     - Mỗi tiến trình ghi 3 mục riêng (`worker-i-item-1..3`) + 1 mục dùng chung (`shared-item`).
-     - Xác minh: cả 5 tiến trình đều thoát với `exitCode === 0`, tổng số bản ghi đúng bằng `5 * 3 + 1 = 16` mục, và **kiểm tra khớp chính xác từng fingerprint SHA-256 của cả 16 bản ghi** (không mất bất kỳ bản ghi nào).
-   - **Giai đoạn 2 (4 tiến trình `resolveTechDebt` song song)**:
-     - Khởi chạy đồng thời **4 tiến trình Node.js** (cùng dùng startup barrier và `holdDelayMs: 30`) để đóng 4 bản ghi cụ thể theo fingerprint trên cùng tệp `TECH_DEBT.md`.
-     - Xác minh: `summarizeTechDebt()` trả về chính xác `total = 16, resolved = 4, open = 12`, đúng 4 fingerprint mục tiêu chuyển sang `checked === true`, và không còn tệp `.lock` hay `.tmp.*`.
-2. **`TD-12 [P0-01/P0-02/P0-03/P1-03/P1-05/P1-06]`: Kiểm thử tính toàn vẹn của `withFileLock`, bảo vệ chủ khóa đang chạy lâu, phân loại lỗi và `recoverOrphanedLock`**:
-   - **Kịch bản 1 (Tái hiện và chống `[P0-01]`, `[P0-02]`, `[P0-03]`)**: Tiến trình chủ A giữ khóa lâu (`holdDelayMs: 250ms`) trong khi hai waiter B và C cùng cạnh tranh với `timeoutMs: 80ms`:
-     - B và C đều ném `LOCK_TIMEOUT` mà **không được đánh cắp hay làm hỏng khóa của A**.
-     - Tiến trình A tiếp tục hoàn tất việc ghi vào `TECH_DEBT.md` và giải phóng `.lock` an toàn khi kết thúc.
-   - **Kịch bản 2 (`[P1-05]` Validate `LockOptions`)**: Truyền `timeoutMs: -1` hoặc `retryMinMs > retryMaxMs` -> ném lỗi `INVALID_LOCK_OPTIONS`.
-   - **Kịch bản 3 (`[P1-03]` Offline Recovery `recoverOrphanedLock`)**:
-     - Khi `.lock` chứa `pid: process.pid` (tiến trình còn sống) -> `recoverOrphanedLock` từ chối thu hồi và ném `LOCK_OWNER_ALIVE`, giữ nguyên `.lock`.
-     - Khi `.lock` chứa `pid: 999999` (tiến trình đã chết — `ESRCH`) -> `recoverOrphanedLock` trả về `{ recovered: true, deadPid: 999999 }` và dọn sạch `.lock`, cho phép lượt `appendTechDebt` tiếp theo chạy thành công.
-3. **`TD-13 [P1-01/P1-04]`: Kiểm thử tích hợp luồng tiếp nhận báo cáo Mentor (`ingestMentorTechDebtReport` -> `appendTechDebt` -> `resolveTechDebt` -> `summarizeTechDebt`)**:
-   - Kiểm thử luồng tiếp nhận báo cáo `P1/P2` qua `ingestMentorTechDebtReport` xuyên qua nhiều vòng review, xác minh tính năng lọc nhiễu, nâng mức `P2 -> P1`, khử trùng lặp trước `maxItems`, đóng nợ kỹ thuật và tổng hợp thống kê.
+Giữ nguyên 13 bài kiểm thử (`TD-1`..`TD-13`) và bổ sung **3 bài kiểm thử mới** (`TD-14`, `TD-15`, `TD-16`):
+1. **`TD-14 [P0-01, NEW-P0-01, P1-01, P1-02, P1-03, P2-02]`: Kiểm thử vòng đời Fail-Closed Quarantine bằng tiến trình con, ngoại lệ khi kiểm tra `.catch`/getter `.then`, bảo toàn `Object.freeze(callbackError)` và retry giải phóng khóa**:
+   - **Kịch bản 1 (`AsyncFunction` pre-check)**: Truyền `async () => {}` -> ném `ASYNC_LOCK_CALLBACK` trước khi lấy khóa, không tạo `.lock`.
+   - **Kịch bản 2 (`[P0-01]` Ngoại lệ khi kiểm tra `.catch`, getter `.then` và `Proxy` có trap `getPrototypeOf` ném lỗi)**:
+     - Tạo một `Promise` có phương thức `.catch` bị ghi đè ném `new Error('CATCH_THREW')` -> `withFileLock` vẫn đặt `quarantineLock = true`, ném `ASYNC_LOCK_CALLBACK` và **giữ nguyên `.lock` trên đĩa**.
+     - Tạo một object có `get then() { throw new Error('THEN_GETTER_THREW'); }` -> `withFileLock` vẫn đặt `quarantineLock = true`, ném `ASYNC_LOCK_CALLBACK` và **giữ nguyên `.lock` trên đĩa**.
+     - Tạo một `new Proxy(pendingPromise, { getPrototypeOf() { throw new Error('PROTOTYPE_TRAP'); } })` -> khi `withFileLock` chạy `callbackResult instanceof Promise`, ngoại lệ `PROTOTYPE_TRAP` bị bắt trong `catch (_classifyErr)`, đặt `quarantineLock = true`, ném `ASYNC_LOCK_CALLBACK`, giữ nguyên `.lock` trên đĩa và xác minh Worker B không thể lấy khóa (`LOCK_TIMEOUT`).
+   - **Kịch bản 3 (`[P0-01]` & `[NEW-P0-01]` Vòng đời khóa cách ly với tiến trình con Worker A và Worker B)**:
+     - Khởi chạy tiến trình con Worker A: bên trong `withFileLock`, callback trả về một `Promise` trì hoãn 250ms (trong đó sau 120ms mới ghi dữ liệu). Ngay khi `withFileLock` của A ném `ASYNC_LOCK_CALLBACK`, tệp `.lock` được giữ ở trạng thái `compromised: true` và tiến trình A vẫn đang sống chờ Promise hoàn tất.
+     - Trong lúc tiến trình A còn sống:
+       1. Gọi `recoverOrphanedLock(tdFile)` -> xác nhận bị chặn với **`LOCK_OWNER_ALIVE`** (`[NEW-P0-01]`).
+       2. Worker B gọi `appendTechDebt(tdFile, ..., { lockOptions: { timeoutMs: 50 } })` -> xác nhận bị chặn với **`LOCK_TIMEOUT`** (`[P0-01]`).
+     - Chờ tiến trình con A kết thúc hoàn toàn (`close` event):
+       1. Gọi `recoverOrphanedLock(tdFile)` -> xác nhận thu hồi thành công (`recovered: true, deadPid: childA.pid, compromised: true`).
+       2. Worker B gọi lại `appendTechDebt(tdFile, ...)` -> ghi thành công mà không xảy ra Lost Update.
+   - **Kịch bản 4 (`[P1-01]` & `[P2-02]` Kiểm thử `releaseLockFile` qua `_unlinkSync`)**:
+     - *4a (Transient `EPERM`)*: `_unlinkSync` ném `EPERM` 2 lần đầu, thành công ở lần 3 -> `attempts === 3`.
+     - *4b (Persistent `EPERM`)*: `_unlinkSync` ném `EPERM` cả 3 lần -> ném `LOCK_RELEASE_FAILED` với `err.attempts === 3` và `err.lockPath === lockFile`.
+     - *4c (Non-transient `EIO`)*: `_unlinkSync` ném `EIO` -> dừng ngay ở lần 1 (`err.attempts === 1`) và ném `LOCK_RELEASE_FAILED`.
+     - *4d (`Object.freeze(callbackError)` + release failure)*: `fn()` ném `Object.freeze(new Error('FROZEN_ERR'))` và `_unlinkSync` ném `EIO` -> `withFileLock` vẫn ném đúng `'FROZEN_ERR'` và `onReleaseError` nhận được `LOCK_RELEASE_FAILED`.
+2. **`TD-15 [P1-02 & P2-01]`: Kiểm thử tiến trình con giữ khóa bị kill thực tế (`child.kill('SIGKILL')`) và khôi phục ngoại tuyến trên Windows/POSIX**:
+   - Khởi chạy tiến trình con giữ khóa, chờ tín hiệu `child.locked` có timeout, kiểm tra `recoverOrphanedLock` ném `LOCK_OWNER_ALIVE` khi tiến trình con còn sống, gọi `child.kill('SIGKILL')`, chờ `close` và xác nhận `ESRCH`, sau đó `recoverOrphanedLock` khôi phục thành công.
+3. **`TD-16 [P1-03 & P2-01]`: Kiểm thử tranh chấp hỗn hợp `appendTechDebt` và `resolveTechDebt` chạy xen kẽ qua 2 vòng độc lập**:
+   - Tạo 6 bản ghi mở (`seed-1`..`seed-6`), chạy 2 vòng liên tiếp (mỗi vòng 3 Worker `append` + 3 Worker `resolve` cùng xuất phát qua startup barrier) và xác minh từng bản ghi trong toàn bộ 18 bản ghi cuối cùng theo `fingerprint`, `summary` và `checked`.
 
 ---
 
 ## 4. Tiêu chí Nghiệm thu (Acceptance Criteria)
-1. `npm test` chạy qua `node:test` đạt **13/13 PASS** (`exitCode === 0`).
+1. `npm test` chạy qua `node:test` đạt **16/16 PASS** (`exitCode === 0`).
 2. `npm run test:workflow` đạt **12/12 PASS** (`exitCode === 0`).
-3. Đóng toàn bộ các mục P1/P2 đã hoàn thành trong `.agents/state/TECH_DEBT.md` bằng `resolveTechDebt()`.
-4. Đạt `CODE_STATUS: APPROVED` ở bước `--mode review-code --task task-2`.
+3. Đóng toàn bộ các mục nợ kỹ thuật còn mở trong `.agents/state/TECH_DEBT.md` bằng `resolveTechDebt()`.
+4. Đạt `CODE_STATUS: APPROVED` ở bước `--mode review-code --task task-3`.

@@ -714,6 +714,7 @@ withFileLock(tdFile, () => {
       recovered: true,
       deadPid: 999999,
       token: 'dead-token-123',
+      compromised: false,
     });
     assert.equal(fs.existsSync(lockFile), false);
   } finally {
@@ -783,6 +784,535 @@ test('TD-13 [P1-01/P1-04]: Kiểm thử tích hợp End-to-End luồng tiếp nh
     assert.equal(stats.open, 2);
     assert.deepEqual(stats.byLevel.P1, { open: 0, resolved: 2 });
     assert.deepEqual(stats.byLevel.P2, { open: 2, resolved: 0 });
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('TD-14 [P0-01, NEW-P0-01, P1-01, P1-02, P1-03, P2-02]: Kiểm thử Fail-Closed Quarantine (AsyncFunction, Promise .catch throw, getter .then throw, Proxy getPrototypeOf throw, child process delayed Promise) và releaseLockFile retry/preservation', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'td-quarantine-'));
+  try {
+    const tdFile = path.join(tmpDir, 'TECH_DEBT.md');
+    const lockFile = `${tdFile}.lock`;
+
+    // Kịch bản 1: AsyncFunction bị chặn ngay TRƯỚC khi lấy khóa (không tạo tệp .lock)
+    let asyncRan = false;
+    assert.throws(
+      () =>
+        withFileLock(tdFile, async () => {
+          asyncRan = true;
+        }),
+      /ASYNC_LOCK_CALLBACK/
+    );
+    assert.equal(asyncRan, false);
+    assert.equal(fs.existsSync(lockFile), false);
+
+    // Kịch bản 2a: Promise có .catch bị ghi đè ném lỗi đồng bộ -> vẫn quarantineLock = true
+    assert.throws(() => {
+      withFileLock(tdFile, () => {
+        const p = Promise.resolve('ok');
+        p.catch = () => {
+          throw new Error('CATCH_OVERRIDDEN_THROW');
+        };
+        return p;
+      });
+    }, /ASYNC_LOCK_CALLBACK/);
+    assert.equal(fs.existsSync(lockFile), true);
+    assert.equal(JSON.parse(fs.readFileSync(lockFile, 'utf8')).compromised, true);
+    fs.unlinkSync(lockFile);
+
+    // Kịch bản 2b: Object có getter .then ném lỗi đồng bộ -> vẫn quarantineLock = true
+    assert.throws(() => {
+      withFileLock(tdFile, () => ({
+        get then() {
+          throw new Error('THEN_GETTER_BOOM');
+        },
+      }));
+    }, /ASYNC_LOCK_CALLBACK/);
+    assert.equal(fs.existsSync(lockFile), true);
+    assert.equal(JSON.parse(fs.readFileSync(lockFile, 'utf8')).compromised, true);
+    fs.unlinkSync(lockFile);
+
+    // Kịch bản 2c: Proxy có trap getPrototypeOf ném lỗi khi chạy instanceof Promise -> vẫn quarantineLock = true & chặn Worker B
+    const basePromise = new Promise((r) => setTimeout(r, 20));
+    const proxyPromise = new Proxy(basePromise, {
+      getPrototypeOf() {
+        throw new Error('PROTOTYPE_TRAP');
+      },
+    });
+    assert.throws(() => {
+      withFileLock(tdFile, () => proxyPromise);
+    }, /ASYNC_LOCK_CALLBACK/);
+    assert.equal(fs.existsSync(lockFile), true);
+    assert.equal(JSON.parse(fs.readFileSync(lockFile, 'utf8')).compromised, true);
+    assert.throws(
+      () =>
+        appendTechDebt(
+          tdFile,
+          [{ id: 'P1-01', title: 'Worker B bị chặn bởi khóa Proxy quarantine' }],
+          { lockOptions: { timeoutMs: 30, retryMinMs: 5, retryMaxMs: 10 } }
+        ),
+      /LOCK_TIMEOUT/
+    );
+    await basePromise;
+    fs.unlinkSync(lockFile);
+
+    // Kịch bản 3: Vòng đời khóa cách ly với tiến trình con Worker A trả về Delayed Promise ([P0-01] & [NEW-P0-01])
+    const quarantinedWorkerScript = path.join(tmpDir, 'quarantined_worker.mjs');
+    const quarantinedSignal = path.join(tmpDir, 'quarantined.signal');
+    fs.writeFileSync(
+      quarantinedWorkerScript,
+      `
+import fs from 'node:fs';
+import { withFileLock } from ${JSON.stringify(MODULE_URL)};
+
+const [tdFile, signalFile] = process.argv.slice(2);
+try {
+  withFileLock(tdFile, () => {
+    return new Promise((resolve) => {
+      setTimeout(() => {
+        resolve('done');
+      }, 300);
+    });
+  });
+} catch (err) {
+  if (err && err.code === 'ASYNC_LOCK_CALLBACK') {
+    fs.writeFileSync(signalFile, 'QUARANTINED', 'utf8');
+  }
+}
+`,
+      'utf8'
+    );
+
+    const childA = childProcess.spawn(
+      process.execPath,
+      [quarantinedWorkerScript, tdFile, quarantinedSignal],
+      { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true }
+    );
+
+    const waitQuarantineStart = Date.now();
+    while (!fs.existsSync(quarantinedSignal)) {
+      if (Date.now() - waitQuarantineStart > 5000) {
+        throw new Error('Child A did not enter quarantine in time');
+      }
+      await new Promise((r) => setTimeout(r, 10));
+    }
+
+    // Trong lúc tiến trình A còn sống (Promise 300ms chưa xong):
+    // 1. recoverOrphanedLock bắt buộc từ chối với LOCK_OWNER_ALIVE ([NEW-P0-01])
+    assert.throws(() => recoverOrphanedLock(tdFile), /LOCK_OWNER_ALIVE/);
+    // 2. Worker B bắt buộc bị chặn với LOCK_TIMEOUT ([P0-01])
+    assert.throws(
+      () =>
+        appendTechDebt(
+          tdFile,
+          [{ id: 'P1-01', title: 'Worker B cố ghi khi khóa đang bị cách ly' }],
+          { lockOptions: { timeoutMs: 40, retryMinMs: 5, retryMaxMs: 10 } }
+        ),
+      /LOCK_TIMEOUT/
+    );
+
+    // Chờ tiến trình A hoàn tất và thoát hẳn
+    await new Promise((resolve, reject) => {
+      childA.on('error', reject);
+      childA.on('close', () => resolve());
+    });
+
+    // Sau khi A đã kết thúc: recoverOrphanedLock thu hồi khóa cách ly thành công
+    const rec = recoverOrphanedLock(tdFile);
+    assert.equal(rec.recovered, true);
+    assert.equal(rec.deadPid, childA.pid);
+    assert.equal(rec.compromised, true);
+    assert.equal(fs.existsSync(lockFile), false);
+
+    // Worker B giờ có thể ghi thành công
+    const addedB = appendTechDebt(
+      tdFile,
+      [{ id: 'P1-01', title: 'Worker B ghi thành công sau khi thu hồi khóa cách ly' }],
+      { threadKey: 'task-3-plan', provider: 'chatgpt', round: 1 }
+    );
+    assert.equal(addedB, 1);
+
+    // Kịch bản 4: Kiểm thử releaseLockFile retry & bảo toàn lỗi gốc ([P1-01], [P1-02], [P2-02])
+    // 4a. Lỗi EPERM tạm thời 2 lần đầu, lần thứ 3 thành công -> attempts = 3
+    let epermTransientCount = 0;
+    const res4a = withFileLock(
+      tdFile,
+      () => 'SUCCESS_AFTER_TRANSIENT_EPERM',
+      {
+        _unlinkSync: (p) => {
+          epermTransientCount += 1;
+          if (epermTransientCount < 3) {
+            const e = new Error('Transient EPERM on unlink');
+            e.code = 'EPERM';
+            throw e;
+          }
+          fs.unlinkSync(p);
+        },
+      }
+    );
+    assert.equal(res4a, 'SUCCESS_AFTER_TRANSIENT_EPERM');
+    assert.equal(epermTransientCount, 3);
+    assert.equal(fs.existsSync(lockFile), false);
+
+    // 4b. Lỗi EPERM kéo dài cả 3 lần -> ném LOCK_RELEASE_FAILED với attempts === 3
+    let epermPersistentCount = 0;
+    let caught4b = null;
+    try {
+      withFileLock(
+        tdFile,
+        () => 'OK',
+        {
+          _unlinkSync: () => {
+            epermPersistentCount += 1;
+            const e = new Error('Persistent EPERM');
+            e.code = 'EPERM';
+            throw e;
+          },
+        }
+      );
+    } catch (err) {
+      caught4b = err;
+    }
+    assert.ok(caught4b);
+    assert.equal(caught4b.code, 'LOCK_RELEASE_FAILED');
+    assert.equal(caught4b.attempts, 3);
+    assert.equal(caught4b.lockPath, path.resolve(lockFile));
+    assert.equal(epermPersistentCount, 3);
+    fs.unlinkSync(lockFile);
+
+    // 4c. Lỗi EIO không tạm thời -> dừng ngay ở lần 1 (attempts === 1)
+    let eioCount = 0;
+    let caught4c = null;
+    try {
+      withFileLock(
+        tdFile,
+        () => 'OK',
+        {
+          _unlinkSync: () => {
+            eioCount += 1;
+            const e = new Error('Hard disk I/O error');
+            e.code = 'EIO';
+            throw e;
+          },
+        }
+      );
+    } catch (err) {
+      caught4c = err;
+    }
+    assert.ok(caught4c);
+    assert.equal(caught4c.code, 'LOCK_RELEASE_FAILED');
+    assert.equal(caught4c.attempts, 1);
+    assert.equal(eioCount, 1);
+    fs.unlinkSync(lockFile);
+
+    // 4d. Callback ném lỗi đã bị Object.freeze() VÀ giải phóng khóa cũng lỗi -> bảo toàn lỗi gốc + báo qua onReleaseError
+    let hookReleaseErr = null;
+    let hookCallbackErr = null;
+    const frozenErr = Object.freeze(new Error('FROZEN_PRIMARY_BUSINESS_ERROR'));
+    let caught4d = null;
+    try {
+      withFileLock(
+        tdFile,
+        () => {
+          throw frozenErr;
+        },
+        {
+          _unlinkSync: () => {
+            const e = new Error('Unlink failed while callback also failed');
+            e.code = 'EIO';
+            throw e;
+          },
+          onReleaseError: (relErr, cbErr) => {
+            hookReleaseErr = relErr;
+            hookCallbackErr = cbErr;
+          },
+        }
+      );
+    } catch (err) {
+      caught4d = err;
+    }
+    assert.equal(caught4d, frozenErr);
+    assert.ok(hookReleaseErr);
+    assert.equal(hookReleaseErr.code, 'LOCK_RELEASE_FAILED');
+    assert.equal(hookCallbackErr, frozenErr);
+    fs.unlinkSync(lockFile);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('TD-15 [P1-02 & P2-01]: Kiểm thử tiến trình con giữ khóa thực tế bị kill (SIGKILL) và khôi phục ngoại tuyến bằng recoverOrphanedLock', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'td-real-crash-'));
+  let child = null;
+  try {
+    const tdFile = path.join(tmpDir, 'TECH_DEBT.md');
+    const lockFile = `${tdFile}.lock`;
+    const lockedSignal = path.join(tmpDir, 'child.locked');
+    const crashWorkerScript = path.join(tmpDir, 'crash_worker.mjs');
+
+    fs.writeFileSync(
+      crashWorkerScript,
+      `
+import fs from 'node:fs';
+import { withFileLock } from ${JSON.stringify(MODULE_URL)};
+
+const [tdFile, lockedSignal] = process.argv.slice(2);
+withFileLock(tdFile, () => {
+  fs.writeFileSync(lockedSignal, String(process.pid), 'utf8');
+  const buf = new Int32Array(new SharedArrayBuffer(4));
+  Atomics.wait(buf, 0, 0, 30000);
+});
+`,
+      'utf8'
+    );
+
+    child = childProcess.spawn(
+      process.execPath,
+      [crashWorkerScript, tdFile, lockedSignal],
+      { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true }
+    );
+
+    const waitStart = Date.now();
+    while (!fs.existsSync(lockedSignal)) {
+      if (Date.now() - waitStart > 5000) {
+        throw new Error('Timeout waiting for child.locked signal');
+      }
+      await new Promise((r) => setTimeout(r, 15));
+    }
+
+    const childPid = child.pid;
+    assert.ok(Number.isInteger(childPid) && childPid > 0);
+
+    // Khi tiến trình con đang sống và giữ khóa -> recoverOrphanedLock phải từ chối với LOCK_OWNER_ALIVE
+    assert.throws(() => recoverOrphanedLock(tdFile), /LOCK_OWNER_ALIVE/);
+    assert.equal(fs.existsSync(lockFile), true);
+
+    // Dừng cưỡng bức tiến trình con và chờ sự kiện close
+    const closePromise = new Promise((resolve) => {
+      child.once('close', () => resolve());
+    });
+    const killed = child.kill('SIGKILL');
+    assert.equal(killed, true);
+    await closePromise;
+    child = null;
+
+    // Chờ OS thu hồi hoàn toàn PID (ESRCH)
+    const reapStart = Date.now();
+    while (Date.now() - reapStart < 3000) {
+      try {
+        process.kill(childPid, 0);
+        await new Promise((r) => setTimeout(r, 15));
+      } catch (err) {
+        if (err && err.code === 'ESRCH') break;
+      }
+    }
+
+    // Tệp khóa mồ côi vẫn còn trên đĩa sau khi tiến trình bị kill
+    assert.equal(fs.existsSync(lockFile), true);
+
+    // Khôi phục ngoại tuyến thành công
+    const rec = recoverOrphanedLock(tdFile);
+    assert.equal(rec.recovered, true);
+    assert.equal(rec.deadPid, childPid);
+    assert.equal(fs.existsSync(lockFile), false);
+
+    // Ghi mục mới thành công sau khi khôi phục khóa
+    const added = appendTechDebt(
+      tdFile,
+      [{ id: 'P1-01', title: 'Ghi thành công sau khi tiến trình giữ khóa bị SIGKILL' }],
+      { threadKey: 'task-3-review', provider: 'chatgpt', round: 1 }
+    );
+    assert.equal(added, 1);
+  } finally {
+    if (child && child.exitCode === null) {
+      try {
+        child.kill('SIGKILL');
+      } catch (_e) {}
+    }
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('TD-16 [P1-03 & P2-01]: Kiểm thử tranh chấp hỗn hợp appendTechDebt và resolveTechDebt chạy xen kẽ qua 2 vòng độc lập', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'td-interleaved-'));
+  try {
+    const tdFile = path.join(tmpDir, 'TECH_DEBT.md');
+    const now = new Date('2026-11-08T00:00:00Z');
+
+    // Khởi tạo trước 6 bản ghi mở độc lập (seed-1 .. seed-6)
+    const seedSummaries = [1, 2, 3, 4, 5, 6].map((i) => `Bản ghi hạt giống ban đầu số ${i}`);
+    const seedAdded = appendTechDebt(
+      tdFile,
+      seedSummaries.map((s, idx) => ({
+        id: `P1-0${idx + 1}`,
+        title: `${s} — Khởi tạo trước tranh chấp`,
+      })),
+      { threadKey: 'task-3-plan', provider: 'chatgpt', round: 1, maxItems: 10 },
+      now
+    );
+    assert.equal(seedAdded, 6);
+
+    const mixedWorkerScript = path.join(tmpDir, 'mixed_worker.mjs');
+    fs.writeFileSync(
+      mixedWorkerScript,
+      `
+import fs from 'node:fs';
+import { appendTechDebt, resolveTechDebt } from ${JSON.stringify(MODULE_URL)};
+
+const [mode, tdFile, barrierFile, payloadJson] = process.argv.slice(2);
+const payload = JSON.parse(payloadJson);
+fs.writeFileSync(barrierFile + '.ready.' + payload.slot, '1', 'utf8');
+
+const start = Date.now();
+while (!fs.existsSync(barrierFile)) {
+  if (Date.now() - start > 10000) throw new Error('Barrier timeout');
+}
+
+if (mode === 'append') {
+  appendTechDebt(tdFile, payload.items, {
+    threadKey: 'task-3-review',
+    provider: 'chatgpt',
+    round: payload.round,
+    lockOptions: { timeoutMs: 15000, retryMinMs: 5, retryMaxMs: 15, holdDelayMs: 20 },
+  });
+} else {
+  resolveTechDebt(
+    tdFile,
+    payload.fingerprint,
+    'Resolved in mixed wave ' + payload.round,
+    new Date('2026-11-08T00:00:00Z'),
+    { timeoutMs: 15000, retryMinMs: 5, retryMaxMs: 15, holdDelayMs: 20 }
+  );
+}
+`,
+      'utf8'
+    );
+
+    const runMixedWave = async (waveId, appendBatches, resolveFingerprints) => {
+      const barrierFile = path.join(tmpDir, `barrier-wave-${waveId}.go`);
+      const tasks = [];
+      let slot = 0;
+
+      for (const batch of appendBatches) {
+        slot += 1;
+        const currentSlot = slot;
+        tasks.push(
+          new Promise((resolve, reject) => {
+            const p = childProcess.spawn(
+              process.execPath,
+              [
+                mixedWorkerScript,
+                'append',
+                tdFile,
+                barrierFile,
+                JSON.stringify({ slot: currentSlot, round: waveId, items: batch }),
+              ],
+              { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true }
+            );
+            let stderr = '';
+            p.stderr.on('data', (d) => {
+              stderr += d.toString();
+            });
+            p.on('error', reject);
+            p.on('close', (code) =>
+              code === 0 ? resolve() : reject(new Error(`Append slot ${currentSlot} failed: ${stderr}`))
+            );
+          })
+        );
+      }
+
+      for (const fp of resolveFingerprints) {
+        slot += 1;
+        const currentSlot = slot;
+        tasks.push(
+          new Promise((resolve, reject) => {
+            const p = childProcess.spawn(
+              process.execPath,
+              [
+                mixedWorkerScript,
+                'resolve',
+                tdFile,
+                barrierFile,
+                JSON.stringify({ slot: currentSlot, round: waveId, fingerprint: fp }),
+              ],
+              { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true }
+            );
+            let stderr = '';
+            p.stderr.on('data', (d) => {
+              stderr += d.toString();
+            });
+            p.on('error', reject);
+            p.on('close', (code) =>
+              code === 0 ? resolve() : reject(new Error(`Resolve slot ${currentSlot} failed: ${stderr}`))
+            );
+          })
+        );
+      }
+
+      const waitStart = Date.now();
+      while (Date.now() - waitStart < 10000) {
+        let ready = 0;
+        for (let s = 1; s <= slot; s += 1) {
+          if (fs.existsSync(`${barrierFile}.ready.${s}`)) ready += 1;
+        }
+        if (ready === slot) break;
+        await new Promise((r) => setTimeout(r, 15));
+      }
+      fs.writeFileSync(barrierFile, 'GO', 'utf8');
+      await Promise.all(tasks);
+    };
+
+    const wave1Appends = [1, 2, 3].map((w) => [
+      { id: 'P1-01', title: `Bản ghi hỗn hợp Vòng A tiến trình ${w} mục 1 — Chi tiết` },
+      { id: 'P2-01', title: `Bản ghi hỗn hợp Vòng A tiến trình ${w} mục 2 — Chi tiết` },
+    ]);
+    const wave1Resolves = [1, 2, 3].map((i) =>
+      buildTechDebtFingerprint('task-3', `Bản ghi hạt giống ban đầu số ${i}`)
+    );
+    await runMixedWave(1, wave1Appends, wave1Resolves);
+
+    const wave2Appends = [1, 2, 3].map((w) => [
+      { id: 'P1-01', title: `Bản ghi hỗn hợp Vòng B tiến trình ${w} mục 1 — Chi tiết` },
+      { id: 'P2-01', title: `Bản ghi hỗn hợp Vòng B tiến trình ${w} mục 2 — Chi tiết` },
+    ]);
+    const wave2Resolves = [4, 5, 6].map((i) =>
+      buildTechDebtFingerprint('task-3', `Bản ghi hạt giống ban đầu số ${i}`)
+    );
+    await runMixedWave(2, wave2Appends, wave2Resolves);
+
+    // Xác minh kết quả sau 2 vòng hỗn hợp (12 tiến trình chạy xen kẽ)
+    const stats = summarizeTechDebt(tdFile);
+    assert.equal(stats.total, 18);
+    assert.equal(stats.resolved, 6);
+    assert.equal(stats.open, 12);
+
+    const allRecords = parseTechDebtFile(fs.readFileSync(tdFile, 'utf8'));
+    assert.equal(allRecords.length, 18);
+    const byFp = new Map(allRecords.map((r) => [r.fingerprint, r]));
+
+    // Toàn bộ 6 bản ghi seed-1..6 phải ở trạng thái checked === true
+    for (const s of seedSummaries) {
+      const fp = buildTechDebtFingerprint('task-3', s);
+      const rec = byFp.get(fp);
+      assert.ok(rec, `Thiếu bản ghi hạt giống "${s}"`);
+      assert.equal(rec.summary, s);
+      assert.equal(rec.checked, true);
+    }
+
+    // Toàn bộ 12 bản ghi thêm mới ở Vòng A & Vòng B phải có mặt và ở trạng thái checked === false
+    for (const waveLabel of ['A', 'B']) {
+      for (let w = 1; w <= 3; w += 1) {
+        for (let m = 1; m <= 2; m += 1) {
+          const s = `Bản ghi hỗn hợp Vòng ${waveLabel} tiến trình ${w} mục ${m}`;
+          const fp = buildTechDebtFingerprint('task-3', s);
+          const rec = byFp.get(fp);
+          assert.ok(rec, `Thiếu bản ghi hỗn hợp "${s}"`);
+          assert.equal(rec.summary, s);
+          assert.equal(rec.checked, false);
+        }
+      }
+    }
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }

@@ -1,12 +1,18 @@
 STATUS: APPROVED
 
+Mentor Design Gate — Task 3 | Vòng 4 | CURRENT_PLAN v1.2 (Revised)
+
+DESIGN GATE PASSED
+
+Kế hoạch sửa đổi đã khắc phục đầy đủ các điểm chặn P0 được ghi nhận trong những vòng đánh giá trước. Cơ chế Fail-Closed Quarantine hiện xử lý cả ngoại lệ phát sinh từ instanceof Promise, phương thức .catch và getter .then.
+
+Quyết định: Cho phép Worker Agent bắt đầu triển khai Task 3 theo kế hoạch đã duyệt.
+
 ISSUE STATUS
 
-- [P0-01] RESOLVED — Đã loại bỏ cơ chế tự động thu hồi stale lock bằng renameSync/unlinkSync khi các Worker cạnh tranh. Chỉ một tiến trình có thể tạo khóa thành công qua fs.openSync(lockPath, 'wx') trên hệ thống tệp cục bộ thuộc phạm vi thiết kế.
+[P0-01] RESOLVED — Toàn bộ quá trình phân loại Promise/thenable được bao trong try/catch. Khi phân loại thất bại, hệ thống đặt quarantineLock = true, không giải phóng khóa và trả về ASYNC_LOCK_CALLBACK.
 
-- [P0-02] RESOLVED — Đã loại bỏ staleMs và mọi cơ chế cướp khóa dựa trên thời gian. Tiến trình giữ khóa lâu hoặc bị tạm dừng không bị các Worker khác thu hồi khóa. Waiter chỉ retry hoặc kết thúc bằng LOCK_TIMEOUT.
-
-- [P0-03] RESOLVED — Trong giao thức Worker thông thường, không còn đường tự động thay thế khóa khi chủ sở hữu đang thực thi fn(). Vì vậy, thao tác unlinkSync(lockPath) trong finally không thể xóa nhầm khóa của Worker khác, miễn là cơ chế phục hồi ngoại tuyến tuân thủ đúng điều kiện bảo trì đã xác định.
+[NEW-P0-01] RESOLVED — Đã loại bỏ forceCompromised. recoverOrphanedLock() từ chối xóa khóa nếu PID sở hữu vẫn còn sống, kể cả khóa có compromised: true.
 
 BLOCKING (P0)
 
@@ -14,143 +20,141 @@ BLOCKING (P0)
 
 NON-BLOCKING (P1/P2)
 
-- Không bổ sung P1/P2 mới trong vòng đánh giá này, tuân thủ Convergence Rule.
+- Không phát sinh góp ý P1/P2 mới trong vòng đánh giá này. Những hạng mục đã ghi nhận trước đó tiếp tục được theo dõi.
 
-Đánh giá quyết định kiến trúc
+Đánh giá kỹ thuật cuối cùng
 
-Bản thiết kế v1.1 đã xử lý đúng nguyên nhân gốc của cả ba lỗi P0 ở vòng trước.
-
-Thành phần
+Hạng mục
 
 	
 
 Kết quả
 
-	
-
-Nhận xét
 
 
 
-
-Atomic lock acquisition
+AsyncFunction pre-acquisition check
 
 	
 
-Đạt
+ Đạt
+
+
+
+
+Promise/thenable detection
 
 	
 
-Sử dụng 'wx' phù hợp với phạm vi local filesystem
+ Đạt
 
 
 
 
-Strict mutual exclusion
-
-	
-
-Đạt
+Proxy getPrototypeOf exception
 
 	
 
-Không cho phép Worker đang chờ cướp khóa
+ Đạt
 
 
 
 
-Ownership-safe release
-
-	
-
-Đạt
+Getter .then exception
 
 	
 
-An toàn theo giao thức không thu hồi khóa trực tuyến
+ Đạt
 
 
 
 
-Timeout và retry
-
-	
-
-Đạt
+Promise .catch exception
 
 	
 
-Giới hạn thời gian, không retry vô hạn
+ Đạt
 
 
 
 
-Offline recovery
-
-	
-
-Đạt có điều kiện
+Fail-Closed Quarantine
 
 	
 
-Phụ thuộc vào việc duy trì trạng thái bảo trì độc quyền
+ Đạt thiết kế
 
 
 
 
-Multi-process testing
-
-	
-
-Đạt về thiết kế
+Compromised lock recovery
 
 	
 
-Có startup barrier và kiểm tra fingerprint
+ Đạt thiết kế
 
 
 
 
-Review integration
-
-	
-
-Đạt về thiết kế
+Release error preservation
 
 	
 
-Chuyển logic tích hợp vào src/ để có thể nghiệm thu độc lập
+ Đạt thiết kế
 
-Tài liệu Node.js xác nhận 'wx' từ chối tạo tệp đã tồn tại và process.kill(pid, 0) có thể được sử dụng để kiểm tra sự tồn tại của tiến trình. Những primitive này phù hợp với lựa chọn kiến trúc trong phạm vi đã giới hạn. 
-GitHub
-+1
 
-Điều kiện cần bảo toàn khi triển khai
 
-Đây là các ràng buộc thực hiện của thiết kế đã duyệt, không phải P0/P1/P2 mới.
 
-1. Recovery thực sự ngoại tuyến: Trước khi gọi recoverOrphanedLock, phải dừng các Worker đang hoạt động và ngăn Worker mới khởi chạy cho đến khi phục hồi hoàn tất. Không được coi một lần kiểm tra PID là cơ chế thay thế cho điều kiện này. Thao tác recovery phải được tuần tự hóa ở cấp vận hành.
+TD-14, TD-15, TD-16
 
-2. Khóa lỗi hoặc payload không hợp lệ: Nếu tiến trình crash ngay sau openSync('wx') nhưng trước khi ghi hoàn chỉnh JSON, khóa có thể còn tồn tại mà không chứa PID hợp lệ. Không được tự động xóa loại khóa này chỉ dựa vào tuổi tệp. Cần quy trình xử lý thủ công khi đã xác nhận toàn bộ Worker dừng hoạt động.
+	
 
-3. Không nới rộng phạm vi bảo đảm: Chỉ những thao tác ghi tham gia cùng giao thức withFileLock mới được bảo vệ khỏi Lost Update. Không tuyên bố bảo vệ các chương trình bên ngoài ghi trực tiếp vào TECH_DEBT.md.
+ Đủ phạm vi kiểm thử
 
-4. Không suy diễn kết quả kiểm thử: 13/13 PASS và 12/12 PASS hiện là tiêu chí nghiệm thu, chưa phải kết quả đã được xác minh.
+Các bất biến cần bảo vệ khi triển khai
 
-Quyết định cuối cùng
+Khi quarantineLock === true, không được gọi releaseLockFile().
 
-PLAN GATE: APPROVED — Task 2 v1.1
+Mọi lỗi phát sinh khi phân loại kết quả trả về phải dẫn tới trạng thái an toàn, không được vô tình đi vào nhánh giải phóng khóa.
 
-Cho phép chuyển sang Implementation Phase với kiến trúc đã duyệt:
+Không thu hồi khóa của PID còn sống.
 
-Triển khai withFileLock theo phương án Strict Mutual Exclusion.
+Không để lỗi giải phóng khóa che mất lỗi nghiệp vụ gốc.
 
-Tích hợp khóa vào toàn bộ Read–Modify–Write của appendTechDebt và resolveTechDebt.
+Worker không được đọc–sửa–ghi TECH_DEBT.md ngoài phạm vi khóa được bảo vệ.
 
-Hoàn thiện recoverOrphanedLock cùng quy trình bảo trì ngoại tuyến.
+Lưu ý triển khai: Việc ghi đè metadata .lock bằng fs.writeFileSync có thể làm hỏng JSON nếu ghi thất bại giữa chừng. Worker cần bảo toàn metadata gốc hoặc áp dụng phương thức cập nhật an toàn, đồng thời xác minh cơ chế recovery không xóa nhầm khóa mới khi có tranh chấp. Đây là những rủi ro cần kiểm tra tại Implementation Gate, không phải P0 mới phát sinh từ bản sửa lần này.
 
-Bổ sung TD-11, TD-12, TD-13 và chạy các bộ kiểm thử hiện có.
+Quyết định triển khai
 
-Chuyển sang review-code để QA kiểm tra mã nguồn, tính đúng đắn của các kịch bản concurrency và bằng chứng kiểm thử thực tế.
+Design Gate
 
-Phạm vi phê duyệt: Phê duyệt thiết kế kỹ thuật CURRENT_PLAN.md v1.1, chưa phải phê duyệt chất lượng code hoặc xác nhận Task 2 hoàn thành.
+APPROVED
+
+Implementation
+
+AUTHORIZED
+
+Code Review Gate
+
+CHƯA ĐÁNH GIÁ
+
+Worker Agent được phép:
+
+Triển khai các thay đổi đã duyệt trong src/tech_debt.mjs.
+
+Bổ sung TD-14, TD-15, TD-16 vào tests/tech_debt.test.mjs.
+
+Chạy npm test và npm run test:workflow.
+
+Gửi git diff, bằng chứng kiểm thử và thay đổi liên quan để đánh giá Implementation Gate.
+
+Lệnh yêu cầu nghiệm thu sau triển khai:
+
+Bash
+node .agents/scripts/ask_mentor.mjs --mode review-code --task task-3
+Kết luận Mentor
+
+Task 3 đã vượt qua Design Gate. Không yêu cầu thêm vòng sửa kế hoạch cho các P0 đã đóng.
+
+Phê duyệt này xác nhận tính phù hợp của thiết kế được cung cấp, không thay thế kiểm chứng mã nguồn thực tế. Chỉ đóng các khoản nợ kỹ thuật còn lại sau khi Implementation Gate đạt CODE_STATUS: APPROVED và các kiểm thử cần thiết thành công.
