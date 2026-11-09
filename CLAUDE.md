@@ -69,3 +69,8 @@ Hệ thống tích hợp danh bạ 9 Chuyên gia trong `.agents/roles.json` (`st
 
 ## 4. Kết thúc Phiên & Bàn giao (Mandatory Handoff)
 - Trước khi dừng hoặc kết thúc phiên làm việc (hoặc khi hết hạn mức/chuyển đổi tài khoản), Agent **LUÔN LUÔN** phải cập nhật đầy đủ trạng thái hiện tại, những việc đã làm, và bước tiếp theo vào `.agents/state/HANDOFF.md`.
+
+## 5. Điều khiển Từ xa Thời gian thực qua Telegram & Reactive Wakeup Bridge (v3.0)
+Khi trong `.env` đã cấu hình `TELEGRAM_BOT_TOKEN` và `TELEGRAM_CHAT_ID`, Agent hỗ trợ cơ chế điều khiển 2 chiều tức thì (< 0.5s) từ điện thoại:
+- Chạy nền `node .agents/scripts/telegram_daemon.mjs --no-banner` và `node .agents/scripts/wakeup_watcher.mjs`.
+- Khi người dùng gửi tin nhắn chữ hoặc Voice (`.ogg` lưu tại `.agents/state/media/`) trên Telegram, `wakeup_watcher.mjs` tự thoát (`exit 0`) để đánh thức Agent thực thi yêu cầu và trả lời qua `node .agents/scripts/send_reply.mjs "<phản hồi>"`.

@@ -7,14 +7,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import os from 'node:os';
+import { readJson, writeJson, withStateLock, commitStateFiles, hasPendingTransaction, acquireLease, digest } from './workflow_state.mjs';
+import { captureBinding, assertBindingCurrent, collectSnapshot } from './review_artifact.mjs';
 import { fileURLToPath } from 'node:url';
-import {
-  loadWorkflowConfig,
-  loadStateLock,
-  saveStateLock,
-  computePlanHash,
-  computeCodeDiffHash,
-} from './verify_guard.mjs';
+import { loadWorkflowConfig, publishApproval } from './verify_guard.mjs';
 import {
   grantExtraRounds,
   removeEscalation,
@@ -121,6 +118,7 @@ export async function callTelegramApi(
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(15_000),
   });
   const data = await res.json();
   if (!data || data.ok !== true) {
@@ -317,18 +315,13 @@ export async function sendEscalationTelegram({
   const { token, chatId: configuredChatId } = getTelegramCredentials(repoRoot, envOverride);
   let chatId = configuredChatId;
 
-  if (token && !chatId) {
-    try {
-      const detected = await detectChatIdFromUpdates(token, fetchImpl);
-      if (detected?.chatId) {
-        chatId = detected.chatId;
-        upsertEnvFile(repoRoot, { TELEGRAM_CHAT_ID: chatId });
-      }
-    } catch (_e) {}
-  }
-
+  // Chat identity must be configured explicitly; never infer an approver from unrelated updates.
+  const binding = captureBinding(repoRoot, cfg, { taskId, mode });
   const sessionData = {
     nonce,
+    schemaVersion: 2,
+    binding,
+    expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
     projectName: resolvedProject,
     taskId,
     threadKey,
@@ -339,11 +332,27 @@ export async function sendEscalationTelegram({
     chatId: chatId || '',
     messageId: null,
     status: 'PENDING',
+    deliveryStatus: token && chatId ? 'SENDING' : 'NOT_SENT',
     createdAt: new Date().toISOString(),
   };
 
+  // Reserve the nonce before sending. A second caller must never send another
+  // approval request while this one is in flight or its delivery is uncertain.
+  withStateLock(repoRoot, () => {
+    if (hasPendingTransaction(repoRoot)) throw new Error('STATE_RECOVERY_REQUIRED');
+    if (fs.existsSync(sessionFile) && readJson(sessionFile).status === 'PENDING') {
+      throw new Error('ESCALATION_ALREADY_PENDING: resolve or explicitly stop the existing session.');
+    }
+    writeJson(sessionFile, sessionData);
+  });
+  const saveDelivery = (patch) => withStateLock(repoRoot, () => {
+    if (hasPendingTransaction(repoRoot)) throw new Error('STATE_RECOVERY_REQUIRED');
+    const current = readJson(sessionFile);
+    if (current.nonce !== nonce || current.status !== 'PENDING') throw new Error('STALE_DECISION_SESSION');
+    writeJson(sessionFile, { ...current, ...patch });
+  });
+
   if (!token || !chatId) {
-    fs.writeFileSync(sessionFile, `${JSON.stringify(sessionData, null, 2)}\n`, 'utf8');
     return {
       sent: false,
       reason: !token ? 'missing_bot_token' : 'missing_chat_id',
@@ -363,8 +372,9 @@ export async function sendEscalationTelegram({
       },
       fetchImpl
     );
-    sessionData.messageId = msg?.message_id ?? null;
-    fs.writeFileSync(sessionFile, `${JSON.stringify(sessionData, null, 2)}\n`, 'utf8');
+    if (!Number.isSafeInteger(msg?.message_id) || msg.message_id <= 0) throw new Error('INVALID_TELEGRAM_MESSAGE_ID');
+    sessionData.messageId = msg.message_id;
+    saveDelivery({ messageId: sessionData.messageId, deliveryStatus: 'SENT' });
     return {
       sent: true,
       nonce,
@@ -373,7 +383,9 @@ export async function sendEscalationTelegram({
       plainText,
     };
   } catch (err) {
-    fs.writeFileSync(sessionFile, `${JSON.stringify(sessionData, null, 2)}\n`, 'utf8');
+    // No automatic resend: a transport failure may happen after Telegram sent
+    // the message. Keep the reservation for explicit recovery or stop.
+    saveDelivery({ deliveryStatus: 'UNCERTAIN' });
     return {
       sent: false,
       reason: err.message,
@@ -420,317 +432,179 @@ export async function sendWorkflowNotification({
 /**
  * Áp dụng quyết định của người dùng vào các file `.agents/state/*`.
  */
+function readDecisionSession(repoRoot, expected = {}) {
+  if (hasPendingTransaction(repoRoot)) throw new Error('STATE_RECOVERY_REQUIRED');
+  const session = readJson(path.join(repoRoot, '.agents/state/ESCALATION_SESSION.json'));
+  if (session.schemaVersion !== 2 || typeof session.nonce !== 'string' || !session.nonce ||
+      typeof session.taskId !== 'string' || !session.taskId || typeof session.threadKey !== 'string' || !session.threadKey ||
+      !['plan', 'review-code', 'rescue'].includes(session.mode) || !['PENDING', 'RESOLVED'].includes(session.status) ||
+      session.binding?.taskId !== session.taskId || session.binding?.mode !== session.mode) {
+    throw new Error('INVALID_DECISION_SESSION');
+  }
+  for (const key of ['nonce', 'taskId', 'threadKey', 'mode', 'chatId', 'messageId']) {
+    if (expected[key] !== undefined && session[key] !== expected[key]) throw new Error('STALE_DECISION_SESSION');
+  }
+  return session;
+}
+
+function readResolvedDecision(repoRoot, session) {
+  const record = readJson(path.join(repoRoot, '.agents/state/HUMAN_DECISION.json'));
+  if (['nonce', 'taskId', 'threadKey', 'mode'].some((key) => record[key] !== session[key])) {
+    throw new Error('DECISION_RECOVERY_REQUIRED');
+  }
+  return record;
+}
+
+function readTelegramCursor(stateDir) {
+  const cursor = readJson(path.join(stateDir, 'TELEGRAM_CURSOR.json'), { missing: { offset: 0 } });
+  if (!Number.isSafeInteger(cursor.offset) || cursor.offset < 0) throw new Error('INVALID_TELEGRAM_CURSOR');
+  return cursor.offset;
+}
+
 export function applyHumanDecisionToState({
-  repoRoot = REPO_ROOT,
-  session,
-  action,
-  choice = '',
-  customInstruction = '',
-  decidedBy = 'telegram',
-  now = new Date(),
+  repoRoot = REPO_ROOT, session, action, choice = '', customInstruction = '',
+  decidedBy = 'telegram', updateId = null, now = new Date(),
 }) {
-  const stateDir = path.join(repoRoot, '.agents', 'state');
-  fs.mkdirSync(stateDir, { recursive: true });
-  const sessionMapPath = path.join(stateDir, 'SESSION_MAP.json');
-  const handoffPath = path.join(stateDir, 'HANDOFF.md');
-  const decisionPath = path.join(stateDir, 'HUMAN_DECISION.json');
-  const escalationSessionPath = path.join(stateDir, 'ESCALATION_SESSION.json');
-  const cfg = loadWorkflowConfig(repoRoot);
-
-  const sessionMap = fs.existsSync(sessionMapPath)
-    ? JSON.parse(fs.readFileSync(sessionMapPath, 'utf8'))
-    : { projectUrl: '', threads: {}, geminiThreads: {}, stageRounds: {} };
-
-  const taskId = session?.taskId || sessionMap.currentTask || 'task-1';
-  const mode = session?.mode || 'plan';
-  const threadKey =
-    session?.threadKey ||
-    `${taskId}-${mode === 'review-code' ? 'review' : mode}`;
-
-  let exitCode = DECISION_EXIT_CODES.EXTEND;
-  let summaryNote = '';
-
-  if (action === 'option') {
-    exitCode = DECISION_EXIT_CODES.OPTION;
-    grantExtraRounds(sessionMap, threadKey, ['chatgpt', 'gemini'], 1, `${decidedBy}:option-${choice}`, now);
-    summaryNote = `Người dùng chọn Phương án ${choice} qua Telegram (được cộng +1 vòng cho ${threadKey}).`;
-  } else if (action === 'extend') {
-    exitCode = DECISION_EXIT_CODES.EXTEND;
-    grantExtraRounds(sessionMap, threadKey, ['chatgpt', 'gemini'], 2, `${decidedBy}:extend-2`, now);
-    summaryNote = `Người dùng gia hạn +2 vòng review qua Telegram cho ${threadKey}.`;
-  } else if (action === 'override') {
-    exitCode = DECISION_EXIT_CODES.OVERRIDE;
-    const isCodeReview = mode === 'review-code';
-    const targetFile = path.join(
-      stateDir,
-      isCodeReview ? 'CODE_REVIEW_FEEDBACK.md' : 'MENTOR_FEEDBACK.md'
-    );
-    const statusHeader = isCodeReview ? 'CODE_STATUS: APPROVED' : 'STATUS: APPROVED';
-
-    // Chuyển các P0 còn mở sang TECH_DEBT.md để theo dõi về sau
-    const tdFile = path.join(stateDir, 'TECH_DEBT.md');
-    const openIssues = session?.openIssues || {};
-    for (const [provider, list] of Object.entries(openIssues)) {
-      if (!Array.isArray(list) || list.length === 0) continue;
-      const debtItems = list.map((item, idx) => ({
-        id: `P1-9${idx + 1}`,
-        title: `[HUMAN-OVERRIDE từ ${item.id}] ${item.title}`,
-        late: false,
-      }));
-      try {
-        appendTechDebt(tdFile, debtItems, { threadKey, provider, round: 99 });
-      } catch (_e) {}
+  return withStateLock(repoRoot, () => {
+    if (hasPendingTransaction(repoRoot)) throw new Error('STATE_RECOVERY_REQUIRED');
+    const stateDir = path.join(repoRoot, '.agents/state');
+    if (!session?.nonce) throw new Error('STALE_DECISION_SESSION');
+    const current = readDecisionSession(repoRoot, session);
+    if (current.status === 'RESOLVED') return readResolvedDecision(repoRoot, current);
+    if (!['option', 'extend', 'override', 'retarget', 'stop'].includes(action)) throw new Error('UNKNOWN_DECISION_ACTION');
+    if (action === 'option' && !['A', 'B', 'C'].includes(choice)) throw new Error('INVALID_OPTION');
+    if (action === 'retarget' && !customInstruction.trim()) throw new Error('EMPTY_RETARGET');
+    const previousOffset = readTelegramCursor(stateDir);
+    if (updateId !== null && (!Number.isSafeInteger(updateId) || updateId < previousOffset || updateId >= Number.MAX_SAFE_INTEGER)) {
+      throw new Error('STALE_OR_INVALID_TELEGRAM_UPDATE');
     }
-
-    const lock = loadStateLock(repoRoot);
-    if (isCodeReview) {
-      const codeHash = computeCodeDiffHash(repoRoot, cfg.sourceDirs);
-      saveStateLock({ ...lock, taskId, codeDiffHash: codeHash, updatedAt: now.toISOString() }, repoRoot);
-      fs.writeFileSync(
-        targetFile,
-        `${statusHeader}\n\n(Được duyệt trực tiếp bởi người dùng qua Telegram — Chấp nhận rủi ro / Human Override lúc ${now.toISOString()}).\n<!-- CODE_SHA256: ${codeHash} | TASK: ${taskId} | TEST_EXIT: 0 | HUMAN_OVERRIDE: true -->\n`,
-        'utf8'
-      );
+    const config = loadWorkflowConfig(repoRoot);
+    if (action !== 'stop') {
+      if (Date.parse(current.expiresAt) < now.getTime() || !Number.isFinite(Date.parse(current.expiresAt))) throw new Error('DECISION_EXPIRED');
+      assertBindingCurrent(repoRoot, config, current.binding);
+    }
+    const sessionMap = readJson(path.join(stateDir, 'SESSION_MAP.json'));
+    if (sessionMap.currentTask && sessionMap.currentTask !== current.taskId) throw new Error('DECISION_TASK_MISMATCH');
+    sessionMap.currentTask = current.taskId;
+    let exitCode, summaryNote;
+    if (action === 'option' || action === 'extend' || action === 'retarget') {
+      const amount = action === 'option' ? 1 : 2;
+      grantExtraRounds(sessionMap, current.threadKey, ['chatgpt', 'gemini'], amount, decidedBy + ':' + action, now);
+      exitCode = action === 'option' ? DECISION_EXIT_CODES.OPTION : action === 'extend' ? DECISION_EXIT_CODES.EXTEND : DECISION_EXIT_CODES.RETARGET;
+      summaryNote = action + (choice ? ':' + choice : '') + ' (+' + amount + ' rounds)';
     } else {
-      const planHash = computePlanHash(repoRoot);
-      saveStateLock({ ...lock, taskId, planHash, updatedAt: now.toISOString() }, repoRoot);
-      fs.writeFileSync(
-        targetFile,
-        `${statusHeader}\n\n(Được duyệt trực tiếp bởi người dùng qua Telegram — Chấp nhận rủi ro / Human Override lúc ${now.toISOString()}).\n<!-- PLAN_SHA256: ${planHash} | TASK: ${taskId} | HUMAN_OVERRIDE: true -->\n`,
-        'utf8'
-      );
+      exitCode = action === 'override' ? DECISION_EXIT_CODES.OVERRIDE : DECISION_EXIT_CODES.STOP;
+      summaryNote = action === 'override' ? 'Human accepted the reviewed risk for this exact artifact.' : 'Task stopped by user.';
     }
-    summaryNote = `Người dùng chọn Chấp nhận rủi ro (Human Override -> ${statusHeader}) qua Telegram cho ${threadKey}.`;
-  } else if (action === 'retarget') {
-    exitCode = DECISION_EXIT_CODES.RETARGET;
-    grantExtraRounds(sessionMap, threadKey, ['chatgpt', 'gemini'], 2, `${decidedBy}:retarget`, now);
-    summaryNote = `Người dùng cập nhật mục tiêu/chỉ đạo mới qua Telegram cho ${threadKey}: "${customInstruction}" (được cộng +2 vòng).`;
-  } else if (action === 'stop') {
-    exitCode = DECISION_EXIT_CODES.STOP;
-    summaryNote = `Người dùng yêu cầu DỪNG Task (${taskId}) qua Telegram.`;
-  }
-
-  fs.writeFileSync(sessionMapPath, `${JSON.stringify(sessionMap, null, 2)}\n`, 'utf8');
-
-  // Xóa khối ESCALATION khỏi HANDOFF.md (trừ khi chọn stop) và ghi chú quyết định mới
-  const rawHandoff = fs.existsSync(handoffPath) ? fs.readFileSync(handoffPath, 'utf8') : '# HANDOFF\n';
-  const cleanedHandoff =
-    action === 'stop' ? rawHandoff : removeEscalation(rawHandoff, threadKey);
-  const decisionSection = [
-    '',
-    `## ✅ Quyết định từ Người dùng (${now.toISOString()})`,
-    `- **Task / Giai đoạn**: \`${taskId}\` (\`${threadKey}\`)`,
-    `- **Hành động**: \`${action.toUpperCase()}\`${choice ? ` (Phương án ${choice})` : ''}`,
-    ...(customInstruction ? [`- **Chỉ đạo trực tiếp**: ${customInstruction}`] : []),
-    `- **Ghi chú**: ${summaryNote}`,
-    '',
-  ].join('\n');
-  fs.writeFileSync(
-    handoffPath,
-    `${cleanedHandoff.replace(/\s*$/, '')}\n${decisionSection}`,
-    'utf8'
-  );
-
-  const decisionRecord = {
-    nonce: session?.nonce || '',
-    taskId,
-    threadKey,
-    mode,
-    action,
-    choice,
-    customInstruction,
-    exitCode,
-    summaryNote,
-    decidedAt: now.toISOString(),
-  };
-  fs.writeFileSync(decisionPath, `${JSON.stringify(decisionRecord, null, 2)}\n`, 'utf8');
-
-  if (fs.existsSync(escalationSessionPath)) {
-    try {
-      const updatedSession = {
-        ...session,
-        status: 'RESOLVED',
-        resolvedAction: action,
-        resolvedAt: now.toISOString(),
-      };
-      fs.writeFileSync(escalationSessionPath, `${JSON.stringify(updatedSession, null, 2)}\n`, 'utf8');
-    } catch (_e) {}
-  }
-
-  return decisionRecord;
+    let testSnapshot;
+    if (action === 'override') {
+      if (current.mode === 'review-code') {
+        testSnapshot = collectSnapshot(repoRoot, config, current.taskId, current.mode);
+        if (testSnapshot.positiveTestExitCode !== 0) throw new Error('OVERRIDE_REQUIRES_PASSING_TESTS');
+      }
+      for (const [provider, issues] of Object.entries(current.openIssues || {})) {
+        for (const [i, issue] of issues.entries()) appendTechDebt(path.join(stateDir, 'TECH_DEBT.md'), [{ id: 'P1-' + String(90 + i).padStart(2, '0'), title: '[HUMAN-OVERRIDE ' + issue.id + '] ' + issue.title }], { threadKey: current.threadKey, provider, round: 99 });
+      }
+    }
+    const record = { nonce: current.nonce, taskId: current.taskId, threadKey: current.threadKey, mode: current.mode, action, choice, customInstruction, updateId, exitCode, summaryNote, decidedAt: now.toISOString() };
+    const handoffFile = path.join(stateDir, 'HANDOFF.md');
+    const raw = fs.existsSync(handoffFile) ? fs.readFileSync(handoffFile, 'utf8') : '# HANDOFF\n';
+    const handoff = (action === 'stop' ? raw : removeEscalation(raw, current.threadKey)).trimEnd() + '\n\n## Human decision\n- Task: ' + current.taskId + '\n- Action: ' + action + '\n- Note: ' + summaryNote + '\n' + (customInstruction ? '- Instruction: ' + customInstruction + '\n' : '');
+    const writes = {
+      'SESSION_MAP.json': JSON.stringify(sessionMap, null, 2) + '\n',
+      'HANDOFF.md': handoff,
+      'HUMAN_DECISION.json': JSON.stringify(record, null, 2) + '\n',
+      'ESCALATION_SESSION.json': JSON.stringify({ ...current, status: 'RESOLVED', resolvedAction: action, resolvedAt: now.toISOString() }, null, 2) + '\n',
+    };
+    if (action === 'stop') {
+      // STOP revokes existing authorizations in the same transaction. A new,
+      // explicitly requested plan review is required before implementation.
+      writes['STATE_LOCK.json'] = JSON.stringify({ schemaVersion: 2, taskId: current.taskId, plan: null, code: null, planHash: '', codeDiffHash: '', updatedAt: now.toISOString() }, null, 2) + '\n';
+      writes['MENTOR_FEEDBACK.md'] = 'STATUS: PENDING\n\nSTOPPED_BY_USER: ' + current.taskId + '\n';
+      writes['CODE_REVIEW_FEEDBACK.md'] = 'CODE_STATUS: PENDING\n\nSTOPPED_BY_USER: ' + current.taskId + '\n';
+    }
+    if (Number.isSafeInteger(updateId)) writes['TELEGRAM_CURSOR.json'] = JSON.stringify({ offset: Math.max(previousOffset, updateId + 1) }) + '\n';
+    if (action === 'override') publishApproval(repoRoot, current.binding, { requestId: 'human-' + current.nonce, provider: 'human', approvedBy: decidedBy, humanOverride: true, testExitCode: testSnapshot?.positiveTestExitCode ?? null, testEvidenceHash: testSnapshot?.testEvidenceHash || '', extraWrites: writes });
+    else commitStateFiles(repoRoot, writes);
+    return record;
+  });
 }
 
 /**
  * Lắng nghe quyết định 2 chiều từ người dùng trên Telegram cho phiên Escalation đang mở.
  */
 export async function waitForTelegramDecision({
-  repoRoot = REPO_ROOT,
-  timeoutMs = 60 * 60 * 1000,
-  pollIntervalMs = 2000,
-  envOverride = null,
-  fetchImpl = globalThis.fetch,
+  repoRoot = REPO_ROOT, timeoutMs = 60 * 60 * 1000, pollIntervalMs = 2000,
+  envOverride = null, fetchImpl = globalThis.fetch, expectedTaskId = '', expectedMode = '',
 }) {
-  const stateDir = path.join(repoRoot, '.agents', 'state');
+  const stateDir = path.join(repoRoot, '.agents/state');
   const sessionFile = path.join(stateDir, 'ESCALATION_SESSION.json');
-  if (!fs.existsSync(sessionFile)) {
-    throw new Error('Không tìm thấy phiên .agents/state/ESCALATION_SESSION.json đang mở.');
-  }
-  const session = JSON.parse(fs.readFileSync(sessionFile, 'utf8'));
-  const { token, chatId: envChatId } = getTelegramCredentials(repoRoot, envOverride);
-  const expectedChatId = String(envChatId || session.chatId || '').trim();
-
-  if (!token || !expectedChatId) {
-    throw new Error(
-      'Chưa cấu hình đầy đủ TELEGRAM_BOT_TOKEN và TELEGRAM_CHAT_ID trong .env. Hãy chạy: npm run telegram-setup'
-    );
-  }
-
-  let offset = 0;
-  let awaitingCustomText = false;
-  const startTime = Date.now();
-  const minMessageId = Number(session.messageId) || 0;
-
-  while (Date.now() - startTime < timeoutMs) {
-    const updates = await callTelegramApi(
-      token,
-      'getUpdates',
-      {
-        offset,
-        limit: 20,
-        timeout: 0,
-        allowed_updates: ['message', 'callback_query'],
-      },
-      fetchImpl
-    );
-
-    if (Array.isArray(updates)) {
-      for (const u of updates) {
-        offset = Math.max(offset, (u.update_id || 0) + 1);
-
-        // 1. Xử lý bấm nút Inline Keyboard
-        if (u.callback_query) {
-          const cb = u.callback_query;
-          const fromChatId = String(cb.message?.chat?.id ?? '');
-          if (fromChatId !== expectedChatId) continue;
-
+  let session = readDecisionSession(repoRoot);
+  if ((expectedTaskId && session.taskId !== expectedTaskId) || (expectedMode && session.mode !== expectedMode)) throw new Error('DECISION_TASK_MISMATCH');
+  if (session.status === 'RESOLVED') return readResolvedDecision(repoRoot, session);
+  if (!Number.isSafeInteger(session.messageId) || session.messageId <= 0) throw new Error('ESCALATION_NOT_DELIVERED');
+  // Pin the session that the caller selected. Do not silently switch tasks or
+  // nonces when another process replaces the session during a network await.
+  const expected = Object.fromEntries(['nonce', 'taskId', 'threadKey', 'mode', 'chatId', 'messageId'].map((key) => [key, session[key]]));
+  const { token, chatId } = getTelegramCredentials(repoRoot, envOverride);
+  if (!token || !chatId || String(chatId) !== String(session.chatId)) throw new Error('TELEGRAM_APPROVER_NOT_CONFIGURED');
+  const release = acquireLease(path.join(os.tmpdir(), 'ai-workflow-telegram-' + digest(token) + '.lock'));
+  try {
+    const cursorFile = path.join(stateDir, 'TELEGRAM_CURSOR.json');
+    let offset = readTelegramCursor(stateDir);
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      session = readDecisionSession(repoRoot, expected);
+      if (session.status === 'RESOLVED') return readResolvedDecision(repoRoot, session);
+      const updates = await callTelegramApi(token, 'getUpdates', { offset, limit: 20, timeout: 0, allowed_updates: ['message', 'callback_query'] }, fetchImpl);
+      session = readDecisionSession(repoRoot, expected);
+      if (session.status === 'RESOLVED') return readResolvedDecision(repoRoot, session);
+      for (const update of Array.isArray(updates) ? updates : []) {
+        session = readDecisionSession(repoRoot, expected);
+        if (session.status === 'RESOLVED') return readResolvedDecision(repoRoot, session);
+        if (!Number.isSafeInteger(update.update_id) || update.update_id < offset || update.update_id >= Number.MAX_SAFE_INTEGER) continue;
+        let action = '', choice = '', customInstruction = '';
+        const cb = update.callback_query;
+        if (cb && String(cb.message?.chat?.id) === String(chatId) && Number(cb.message?.message_id) === Number(session.messageId)) {
           const data = String(cb.data || '');
-          const prefix = `esc:${session.nonce}:`;
-          if (!data.startsWith(prefix)) {
-            await callTelegramApi(
-              token,
-              'answerCallbackQuery',
-              {
-                callback_query_id: cb.id,
-                text: 'Phiên quyết định này đã cũ hoặc không còn hiệu lực.',
-              },
-              fetchImpl
-            ).catch(() => {});
-            continue;
+          const prefix = 'esc:' + session.nonce + ':';
+          if (data.startsWith(prefix)) {
+            const raw = data.slice(prefix.length);
+            if (/^opt_[abc]$/.test(raw)) { action = 'option'; choice = raw.slice(-1).toUpperCase(); }
+            else if (raw === 'extend_2') action = 'extend';
+            else if (raw === 'override' || raw === 'stop') action = raw;
+            else if (raw === 'retarget') {
+              withStateLock(repoRoot, () => {
+                const latest = readDecisionSession(repoRoot, expected);
+                if (latest.status !== 'PENDING') throw new Error('STALE_DECISION_SESSION');
+                writeJson(sessionFile, { ...latest, awaitingCustomText: true });
+              });
+              await callTelegramApi(token, 'sendMessage', { chat_id: chatId, text: 'Chọn Trả lời (Reply) vào thông báo yêu cầu quyết định ban đầu phía trên, rồi nhập hướng dẫn mới.' }, fetchImpl);
+              await callTelegramApi(token, 'answerCallbackQuery', { callback_query_id: cb.id, text: 'Đang chờ hướng dẫn mới.' }, fetchImpl).catch(() => {});
+            }
           }
-
-          const rawAction = data.slice(prefix.length);
-          await callTelegramApi(
-            token,
-            'answerCallbackQuery',
-            { callback_query_id: cb.id, text: 'Đã ghi nhận lựa chọn của bạn!' },
-            fetchImpl
-          ).catch(() => {});
-
-          if (rawAction === 'retarget') {
-            awaitingCustomText = true;
-            await callTelegramApi(
-              token,
-              'sendMessage',
-              {
-                chat_id: expectedChatId,
-                text: `✏️ Bạn hãy nhắn trực tiếp mục tiêu / chỉ đạo mới cho Task "${session.taskId}" vào khung chat này:`,
-              },
-              fetchImpl
-            );
-            continue;
-          }
-
-          let action = 'extend';
-          let choice = '';
-          if (rawAction === 'opt_a' || rawAction === 'opt_b' || rawAction === 'opt_c') {
-            action = 'option';
-            choice = rawAction.slice(-1).toUpperCase();
-          } else if (rawAction === 'extend_2') {
-            action = 'extend';
-          } else if (rawAction === 'override') {
-            action = 'override';
-          } else if (rawAction === 'stop') {
-            action = 'stop';
-          }
-
-          const record = applyHumanDecisionToState({
-            repoRoot,
-            session,
-            action,
-            choice,
-            decidedBy: 'telegram',
-          });
-
-          await callTelegramApi(
-            token,
-            'sendMessage',
-            {
-              chat_id: expectedChatId,
-              text: `✅ Đã thực thi quyết định: ${record.summaryNote}`,
-            },
-            fetchImpl
-          ).catch(() => {});
-
+        }
+        const message = update.message;
+        if (message && String(message.chat?.id) === String(chatId) && typeof message.text === 'string' && message.text.trim() && !message.text.startsWith('/')) {
+          // Free text must explicitly reply to this escalation; unrelated messages never retarget a task.
+          if (Number(message.reply_to_message?.message_id) === Number(session.messageId) && Number(session.messageId) > 0) { action = 'retarget'; customInstruction = message.text.trim(); }
+        }
+        if (action) {
+          const record = applyHumanDecisionToState({ repoRoot, session, action, choice, customInstruction, decidedBy: cb ? 'telegram:' + String(cb.from?.id || chatId) : 'telegram:' + String(message.from?.id || chatId), updateId: update.update_id });
+          if (cb) await callTelegramApi(token, 'answerCallbackQuery', { callback_query_id: cb.id, text: 'Decision recorded.' }, fetchImpl).catch(() => {});
+          // Local state is committed before this best-effort acknowledgement.
+          await callTelegramApi(token, 'getUpdates', { offset: update.update_id + 1, limit: 1, timeout: 0 }, fetchImpl).catch(() => {});
           return record;
         }
-
-        // 2. Xử lý khi người dùng nhắn tin văn bản trực tiếp (hoặc sau khi bấm "Đổi mục tiêu")
-        if (u.message && typeof u.message.text === 'string') {
-          const fromChatId = String(u.message.chat?.id ?? '');
-          if (fromChatId !== expectedChatId) continue;
-          const msgId = Number(u.message.message_id) || 0;
-          if (!awaitingCustomText && minMessageId > 0 && msgId <= minMessageId) continue;
-          const text = u.message.text.trim();
-          if (!text || text.startsWith('/start')) continue;
-
-          if (awaitingCustomText || text.length > 0) {
-            const record = applyHumanDecisionToState({
-              repoRoot,
-              session,
-              action: 'retarget',
-              customInstruction: text,
-              decidedBy: 'telegram-text',
-            });
-            await callTelegramApi(
-              token,
-              'sendMessage',
-              {
-                chat_id: expectedChatId,
-                text: `✅ Đã nhận chỉ đạo mới của bạn cho ${session.taskId} (+2 vòng):\n"${text}"`,
-              },
-              fetchImpl
-            ).catch(() => {});
-            return record;
-          }
-        }
+        offset = withStateLock(repoRoot, () => {
+          readDecisionSession(repoRoot, expected);
+          const next = Math.max(readTelegramCursor(stateDir), update.update_id + 1);
+          writeJson(cursorFile, { offset: next });
+          return next;
+        });
       }
+      if (pollIntervalMs > 0) await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
     }
-
-    if (pollIntervalMs > 0) {
-      await new Promise((r) => setTimeout(r, pollIntervalMs));
-    }
-  }
-
-  return {
-    nonce: session.nonce,
-    taskId: session.taskId,
-    threadKey: session.threadKey,
-    mode: session.mode,
-    action: 'timeout',
-    choice: '',
-    customInstruction: '',
-    exitCode: DECISION_EXIT_CODES.TIMEOUT,
-    summaryNote: 'Hết thời gian chờ phản hồi từ Telegram.',
-    decidedAt: new Date().toISOString(),
-  };
+    return { nonce: session.nonce, taskId: session.taskId, action: 'timeout', exitCode: DECISION_EXIT_CODES.TIMEOUT, summaryNote: 'Telegram decision timeout.' };
+  } finally { release(); }
 }

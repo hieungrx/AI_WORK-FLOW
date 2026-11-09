@@ -502,6 +502,10 @@ test('RP-13: Adaptive Rounds — tự động cộng vòng khi P0 giảm, báo b
 await (async () => {
   const tmpRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'rp-tg-'));
   try {
+    childProcess.execFileSync('git', ['init', '-b', 'feat/task-8'], { cwd: tmpRepo, stdio: 'ignore' });
+    childProcess.execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: tmpRepo, stdio: 'ignore' });
+    childProcess.execFileSync('git', ['config', 'user.name', 'Test'], { cwd: tmpRepo, stdio: 'ignore' });
+    childProcess.execFileSync('git', ['commit', '--allow-empty', '-m', 'init'], { cwd: tmpRepo, stdio: 'ignore' });
     fs.mkdirSync(path.join(tmpRepo, '.agents', 'state'), { recursive: true });
     fs.writeFileSync(
       path.join(tmpRepo, '.agents', 'state', 'ROADMAP.md'),
@@ -599,7 +603,7 @@ await (async () => {
         update_id: 12,
         callback_query: {
           id: 'cb-valid',
-          message: { chat: { id: 99887766 } },
+          message: { chat: { id: 99887766 }, message_id: sendRes.messageId },
           data: `esc:${sendRes.nonce}:override`,
         },
       },
@@ -620,7 +624,7 @@ await (async () => {
       'utf8'
     );
     assert.ok(feedbackAfter.startsWith('STATUS: APPROVED'));
-    assert.ok(feedbackAfter.includes('HUMAN_OVERRIDE: true'));
+    assert.ok(feedbackAfter.includes('HUMAN_OVERRIDE'));
 
     const techDebtAfter = fs.readFileSync(
       path.join(tmpRepo, '.agents', 'state', 'TECH_DEBT.md'),

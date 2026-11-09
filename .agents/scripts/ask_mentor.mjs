@@ -6,6 +6,11 @@ import childProcess from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright-core';
 import os from 'node:os';
+import { readJson, writeAtomic, writeJson, withRunnerLease, hasPendingTransaction, loadRequest, saveRequest, pendingRequest, transitionRequest, recordMetric } from './workflow_state.mjs';
+import { collectSnapshot, assertBindingCurrent } from './review_artifact.mjs';
+import { parseReviewContract } from './review_contract.mjs';
+import { executeReviewRequest, assertPendingBindingCurrent } from './review_runner.mjs';
+import { invalidateApproval, publishApproval } from './verify_guard.mjs';
 import {
   loadWorkflowConfig,
   stageIntentToAdd,
@@ -692,15 +697,7 @@ export function normalizeSessionMap(parsed) {
  * @returns {ReturnType<typeof normalizeSessionMap>}
  */
 function loadSessionMap() {
-  try {
-    if (!fs.existsSync(SESSION_MAP_FILE)) {
-      return normalizeSessionMap(null);
-    }
-    const raw = fs.readFileSync(SESSION_MAP_FILE, 'utf8');
-    return normalizeSessionMap(JSON.parse(raw));
-  } catch (_err) {
-    return normalizeSessionMap(null);
-  }
+  return normalizeSessionMap(readJson(SESSION_MAP_FILE, { missing: {} }));
 }
 
 /**
@@ -709,12 +706,7 @@ function loadSessionMap() {
  * @param {{ projectName?: string, projectUrl: string, currentTask: string, threads: Record<string, { url: string, updatedAt: string }> }} sessionMap
  */
 function saveSessionMap(sessionMap) {
-  fs.mkdirSync(STATE_DIR, { recursive: true });
-  fs.writeFileSync(
-    SESSION_MAP_FILE,
-    `${JSON.stringify(sessionMap, null, 2)}\n`,
-    'utf8'
-  );
+  writeJson(SESSION_MAP_FILE, sessionMap);
 }
 
 /**
@@ -1023,130 +1015,8 @@ function truncateSafely(text, maxChars = MAX_DIFF_CHARS) {
  *   positiveTestExitCode: number
  * }}
  */
-function collectReviewSnapshot(repoRoot = REPO_ROOT) {
-  stageIntentToAdd(repoRoot, REVIEW_SCOPE);
-  const scopeArgs = REVIEW_SCOPE.join(' ');
-  let gitStatus = '';
-  let gitDiff = '';
-  let newFilesList = [];
-  const newFilesBlocks = [];
-
-  try {
-    gitStatus = childProcess
-      .execSync(`git status --short -- ${scopeArgs}`, {
-        cwd: repoRoot,
-        encoding: 'utf8',
-        stdio: ['ignore', 'pipe', 'pipe'],
-      })
-      .trim();
-  } catch (err) {
-    gitStatus = `[Không thể chạy git status: ${err.message}]`;
-  }
-
-  try {
-    gitDiff = childProcess
-      .execSync(`git diff HEAD -- ${scopeArgs}`, {
-        cwd: repoRoot,
-        encoding: 'utf8',
-        stdio: ['ignore', 'pipe', 'pipe'],
-      })
-      .trim();
-  } catch (_err) {
-    try {
-      gitDiff = childProcess
-        .execSync(`git diff -- ${scopeArgs}`, {
-          cwd: repoRoot,
-          encoding: 'utf8',
-          stdio: ['ignore', 'pipe', 'pipe'],
-        })
-        .trim();
-    } catch (innerErr) {
-      gitDiff = `[Không thể chạy git diff: ${innerErr.message}]`;
-    }
-  }
-
-  try {
-    const untrackedRaw = childProcess
-      .execSync(`git ls-files --others --exclude-standard -- ${scopeArgs}`, {
-        cwd: repoRoot,
-        encoding: 'utf8',
-        stdio: ['ignore', 'pipe', 'pipe'],
-      })
-      .trim();
-    if (untrackedRaw) {
-      newFilesList = untrackedRaw
-        .split(/\r?\n/)
-        .map((f) => f.trim())
-        .filter((f) => f && !f.startsWith('.agents/'));
-      for (const relPath of newFilesList) {
-        const fullPath = path.join(repoRoot, relPath);
-        if (fs.existsSync(fullPath) && fs.statSync(fullPath).isFile()) {
-          const content = fs.readFileSync(fullPath, 'utf8');
-          newFilesBlocks.push(`=== FILE MỚI: ${relPath} ===\n${content}`);
-        }
-      }
-    }
-  } catch (_err) {
-    // Bỏ qua nếu không lấy được untracked files
-  }
-
-  // Thực thi trực tiếp lệnh `npm test`
-  const testOptions = {
-    cwd: repoRoot,
-    encoding: 'utf8',
-    timeout: 240_000,
-    windowsHide: true,
-  };
-  const npmTestRes =
-    process.platform === 'win32'
-      ? childProcess.spawnSync(
-          process.env.ComSpec || 'cmd.exe',
-          ['/d', '/s', '/c', TEST_COMMAND],
-          testOptions
-        )
-      : childProcess.spawnSync('sh', ['-c', TEST_COMMAND], testOptions);
-
-  const positiveTestExitCode =
-    !npmTestRes.error && npmTestRes.signal === null && npmTestRes.status === 0
-      ? 0
-      : 1;
-
-  const testEvidence = [
-    `Exit Code: ${npmTestRes.status} (signal: ${npmTestRes.signal}, error: ${npmTestRes.error || 'none'})`,
-    'Stdout:',
-    (npmTestRes.stdout || '').trim(),
-    'Stderr:',
-    (npmTestRes.stderr || '(trống)').trim(),
-  ].join('\n');
-
-  const newFilesContent = newFilesBlocks.join('\n\n');
-  const fullBundleText = [
-    '=== KẾT QUẢ CHẠY NPM TEST ===',
-    testEvidence,
-    '',
-    '=== GIT STATUS (src/ tests/) ===',
-    gitStatus || '(Không có thay đổi)',
-    '',
-    '=== DANH SÁCH FILE MỚI TRONG src/ tests/ ===',
-    newFilesList.length > 0 ? newFilesList.join('\n') : '(Không có file mới)',
-    '',
-    '=== GIT DIFF HEAD -- src/ tests/ ===',
-    gitDiff || '(Không có diff)',
-    '',
-    newFilesContent ? `=== NỘI DUNG FILE MỚI (src/ tests/) ===\n${newFilesContent}` : '',
-  ]
-    .filter(Boolean)
-    .join('\n');
-
-  return {
-    gitStatus: gitStatus || '(Không có thay đổi trong src/ và tests/)',
-    gitDiff: gitDiff || '(Không có khác biệt git diff trong src/ và tests/)',
-    newFilesList,
-    newFilesContent,
-    fullBundleText,
-    testEvidence,
-    positiveTestExitCode,
-  };
+export function collectReviewSnapshot(repoRoot = REPO_ROOT, taskId = 'task-1', mode = 'review-code', runTests = true) {
+  return collectSnapshot(repoRoot, loadWorkflowConfig(repoRoot), taskId, mode, { runTests });
 }
 
 /**
@@ -1205,6 +1075,9 @@ export function buildMentorPrompt(
 
     corePrompt = [
       'Bạn là Mentor thực hiện bước Review Code trong quy trình RPIR.',
+      '--- APPROVED PLAN / ACCEPTANCE CRITERIA ---',
+      planContent,
+      '--- END PLAN ---',
       'Hãy kiểm tra kết quả chạy `npm test` và thay đổi mã nguồn ứng dụng (`git diff HEAD -- src/ tests/` kèm các file mới trong `src/`, `tests/`).',
       'Yêu cầu bắt buộc ở dòng đầu tiên của phản hồi:',
       '- Ghi rõ `CODE_STATUS: APPROVED` nếu code và test đạt yêu cầu (hoặc chỉ còn góp ý P1/P2).',
@@ -1246,6 +1119,7 @@ export function buildMentorPrompt(
       gitStatus,
       '--- GIT DIFF HEAD -- src/ tests/ ---',
       truncateSafely(gitDiff, MAX_INLINE_CODE_CHARS),
+      '--- CURRENT PLAN ---', planContent,
     ].join('\n');
   }
 
@@ -2035,7 +1909,8 @@ async function tryInvokeGptMention(page, promptTextarea, selectedRoles) {
           )
           .catch(() => 0);
 
-        if (newPillCount > prevPillCount) {
+        const names = await promptTextarea.evaluate((el) => Array.from(el.querySelectorAll('[app-mention-display-name], [data-appearance="inline-mention"]')).map((n) => n.getAttribute('app-mention-display-name') || n.textContent || '')).catch(() => []);
+        if (newPillCount > prevPillCount && names.some((name) => name.replace(/^@/, '').trim().toLowerCase() === pluginName.toLowerCase())) {
           attachedCount += 1;
           console.log(
             `[ROLE MENTION]: Đã kích hoạt Plugin "@${pluginName}" thành công.`
@@ -2574,8 +2449,8 @@ async function getAssistantState(page) {
         const text = (el.innerText || '').trim();
         return (
           !el.className.includes('rich-text-user-turn') &&
-          !el.closest('[class*="bg-user-message"]') &&
-          /(?:CODE_STATUS|STATUS)\s*:\s*(?:APPROVED|REJECTED)/i.test(text)
+          !el.closest('[class*="bg-user-message"], [data-message-author-role="user"], [data-conversation-role="user"], article[data-turn="user"]') &&
+          (/(?:CODE_STATUS|STATUS)\s*:\s*(?:APPROVED|REJECTED)/i.test(text) || /"requestId"\s*:/.test(text))
         );
       });
       if (fallbackNodes.length > 0) {
@@ -2645,12 +2520,8 @@ async function waitForStableAssistantResponse(
       () => ({ userCount: 0, count: 0, lastText: '' })
     );
 
-    // BLOCKER 03: Ở mode review-code, chỉ chấp nhận CODE_STATUS ở dòng đầu. Ở plan/rescue chấp nhận STATUS.
-    const firstLine = (currentText.trim().split(/\r?\n/)[0] || '').trim();
-    const hasStatus =
-      mode === 'review-code'
-        ? /^CODE_STATUS\s*:\s*(?:APPROVED|REJECTED)\b/i.test(firstLine)
-        : /^(?:STATUS|CODE_STATUS)\s*:\s*(?:APPROVED|REJECTED)\b/i.test(firstLine);
+    // Capture only a new complete response; strict JSON identity/schema validation follows.
+    const hasStatus = currentText.trim().length > 0; // Validate schema after complete response capture.
 
     // BẮT BUỘC count > previousAssistantCount: Thuộc lượt Assistant mới sinh, không dùng lại phản hồi cũ
     if (!stopVisible && count > previousAssistantCount && hasStatus) {
@@ -3098,6 +2969,7 @@ export async function askGemini(page, promptText, sessionMap = {}, threadOptions
   const pollStart = Date.now();
   let lastText = '';
   let stableSince = 0;
+  let completed = false;
 
   while (Date.now() - pollStart < timeoutMs) {
     const stopVisible = await stopLocator
@@ -3127,6 +2999,7 @@ export async function askGemini(page, promptText, sessionMap = {}, threadOptions
         if (!stableSince) {
           stableSince = Date.now();
         } else if (Date.now() - stableSince >= 3000) {
+          completed = true;
           break;
         }
       } else {
@@ -3138,7 +3011,7 @@ export async function askGemini(page, promptText, sessionMap = {}, threadOptions
     await sleep(1000);
   }
 
-  if (!lastText) {
+  if (!completed || !lastText) {
     throw new Error('Không lấy được nội dung phản hồi từ Gemini sau thời gian chờ.');
   }
 
@@ -3263,6 +3136,23 @@ function prepareProviderPromptPlan({
  * Đánh giá phản hồi của một Mentor theo Severity Gate + Convergence Rule,
  * ghi vào REVIEW_LEDGER.json + TECH_DEBT.md và trả về văn bản đã chuẩn hóa dòng STATUS.
  */
+// Validation must use the issues that were sent, not a ledger already advanced by this response.
+export function reviewOpenIssuesForRequest(ledger, request) {
+  if (Array.isArray(request.openIssues)) return structuredClone(request.openIssues);
+  const rounds = ledger?.[request.threadKey]?.[request.provider] || [];
+  const previous = rounds.filter((entry) => entry.requestId !== request.requestId && entry.round < request.round);
+  return structuredClone(getOpenIssues({ [request.threadKey]: { [request.provider]: previous } }, request.threadKey, request.provider));
+}
+
+export function validateRequestResponse(responseText, request, ledger) {
+  const prevOpen = reviewOpenIssuesForRequest(ledger, request);
+  const parsed = parseReviewContract(responseText, request, prevOpen);
+  if (detectConvergenceViolations(parsed.report, prevOpen, request.round).length > 0) {
+    throw new Error('CONVERGENCE_VIOLATION: account for all prior issues and mark new blockers.');
+  }
+  return parsed;
+}
+
 function evaluateAndRecordMentorResponse({
   provider,
   mode,
@@ -3271,8 +3161,9 @@ function evaluateAndRecordMentorResponse({
   responseText,
   positiveTestExitCode = 0,
   url = '',
+  request = null,
 }) {
-  const rawStatus = detectApprovalStatus(responseText, mode);
+  let rawStatus = 'REJECTED';
   if (mode === 'rescue') {
     const normalizedText = [
       'STATUS: REJECTED',
@@ -3292,15 +3183,13 @@ function evaluateAndRecordMentorResponse({
     };
   }
 
-  const report = parseSeverityReport(responseText);
   const ledger = loadLedger(REVIEW_LEDGER_FILE);
-  const prevOpen = getOpenIssues(ledger, threadKey, provider);
+  if (!request) throw new Error('REVIEW_REQUEST_REQUIRED');
+  const parsed = validateRequestResponse(responseText, request, ledger);
+  rawStatus = parsed.status;
+  const report = parsed.report;
   const gate = applySeverityGate(rawStatus, report);
   const warnings = [...gate.warnings];
-  const convViolations = detectConvergenceViolations(report, prevOpen, round);
-  if (convViolations.length > 0) {
-    warnings.push('CONVERGENCE_VIOLATION');
-  }
   for (const w of warnings) {
     console.warn(
       `[POLICY WARNING - ${provider.toUpperCase()}]: ${w} — ${WARNING_TEXT[w] || w}`
@@ -3329,6 +3218,8 @@ function evaluateAndRecordMentorResponse({
 
   appendLedgerRound(ledger, threadKey, provider, {
     round,
+    requestId: request.requestId,
+    statuses: report.statuses,
     status: finalStatus,
     rawStatus,
     p0: report.p0,
@@ -3434,715 +3325,223 @@ async function recordEscalationAndThrow({
   );
 }
 
-async function main() {
-  const {
-    mode,
-    provider,
-    taskArg,
-    roleArg,
-    effortArg,
-    newThread,
-    dryRun,
-    resetRounds,
-    ensureProject,
-    errorSummary,
-    model,
-    projectName,
-    cdpUrl,
-    composerArg,
-  } = parseArgs(process.argv.slice(2));
-  const composerMode = resolveComposerMode(composerArg, WORKFLOW_CONFIG, model);
-  const chatgptModel = (model || WORKFLOW_CONFIG.chatgptModel || '').trim();
-  const selectedRoles = resolveSpecialistRoles(roleArg, mode);
-  const dualPolicy = resolveDualMentorPolicy(WORKFLOW_CONFIG.dualMentorPolicy);
-  // Khi --provider both: chạy Gemini trước để đưa P0 của Gemini vào prompt ChatGPT (Second Opinion)
-  const targetProviders =
-    provider === 'both' ? ['gemini', 'chatgpt'] : [provider];
+export async function requireCompleteAttachment(page, bundlePath, attach = attachReviewBundle) {
+  if (!await attach(page, bundlePath)) throw new Error('REVIEW_ATTACHMENT_FAILED: no partial review will be sent.');
+}
 
-  // Chế độ --ensure-project: kết nối Chrome (9222), tự tìm hoặc tạo mới Project trùng tên dự án Antigravity
-  if (ensureProject) {
-    const sessionMap = loadSessionMap();
-    const targetProjectName = (projectName || DEFAULT_PROJECT_NAME).trim();
-    const runtimeConfig = { ...WORKFLOW_CONFIG, cdpUrl };
-    let conn = null;
-    try {
-      conn = await connectProviderPage('chatgpt', runtimeConfig, sessionMap);
-      const resolvedUrl = await ensureProjectUrl(conn.page, sessionMap, targetProjectName);
-      if (!/^https:\/\/chatgpt\.com\/g\/g-p-[a-z0-9]+/i.test(resolvedUrl)) {
-        throw new Error(`Chưa xác nhận được URL Project hợp lệ cho "${targetProjectName}" (nhận được: ${resolvedUrl}).`);
+export function mentionMatchesSelectedRoles(names, selectedRoles) {
+  const normalize = (value) => String(value || '').replace(/^@/, '').trim().toLowerCase();
+  const actual = [...new Set(names.map(normalize).filter(Boolean))];
+  return actual.length === 1 && selectedRoles.some((role) => normalize(role.name) === actual[0]);
+}
+
+async function verifyPluginActivation(editor, roles) {
+  const names = await editor.evaluate((el) => Array.from(el.querySelectorAll(
+    '[app-mention-display-name], [app-mention-path], [data-appearance="inline-mention"]'
+  )).map((pill) => pill.getAttribute('app-mention-display-name') || pill.textContent || '')).catch(() => []);
+  return mentionMatchesSelectedRoles(names, roles);
+}
+
+function createBrowserTransport(provider, options, connections) {
+  let page, editor, prepared;
+  let activationVerified = false;
+  const isChat = provider === 'chatgpt';
+  const userSelector = isChat ? '[data-message-author-role="user"], [data-conversation-role="user"], article[data-turn="user"]' : 'user-query';
+  const hasSubmission = (request) => page.evaluate(({ selector, id }) => {
+    const nodes = Array.from(document.querySelectorAll(selector));
+    const last = nodes[nodes.length - 1];
+    return Boolean(last && (last.innerText || last.textContent || '').includes('REVIEW_REQUEST_ID: ' + id));
+  }, { selector: userSelector, id: request.requestId });
+  return {
+    async prepare(request, resume) {
+      const sessionMap = loadSessionMap();
+      const connection = await connectProviderPage(provider, options.config, sessionMap);
+      connections.push(connection.browser);
+      page = connection.page;
+      if (resume) {
+        const url = request.context?.url;
+        const valid = isChat ? /^https:\/\/chatgpt\.com\/.*\/?c\/[a-z0-9-]+/i.test(url || '') : GEMINI_CONVERSATION_URL_REGEX.test(url || '');
+        if (!valid) throw new Error('UNCERTAIN_CONVERSATION: inspect the open tab before recovery.');
+        await page.goto(url, { waitUntil: 'domcontentloaded' });
+        return request.context;
       }
-      console.log(`[PROJECT READY]: "${targetProjectName}" -> ${resolvedUrl}`);
-      if (!conn.page.url().includes('/project')) {
-        await conn.page.goto(resolvedUrl, { waitUntil: 'domcontentloaded' });
-        await sleep(2500);
+      const entry = (isChat ? sessionMap.threads : sessionMap.geminiThreads)?.[request.threadKey];
+      if (isChat) {
+        prepared = await prepareTaskThread(page, { existingThreadUrl: entry?.url || '', isNewThread: options.newThread || !entry?.url, projectUrl: sessionMap.projectUrl, model: options.model, projectName: options.projectName, sessionMap, composerMode: options.composerMode });
+        editor = page.locator(PROMPT_SELECTOR).first();
+        await editor.waitFor({ state: 'visible', timeout: 60_000 });
+        if (options.composerMode === 'work' && options.model) await selectChatGptModel(page, options.model);
+        await setThinkingEffort(page, request.mode, options.effortArg);
+        activationVerified = await tryInvokeGptMention(page, editor, options.selectedRoles);
+        if (options.config.requirePlugin && !activationVerified) throw new Error('REQUIRED_PLUGIN_NOT_VERIFIED');
+      } else {
+        prepared = await prepareGeminiThread(page, { existingThreadUrl: entry?.url || '', isNewThread: options.newThread || !entry?.url, gemUrl: normalizeGeminiGemUrl(options.config.geminiGemUrl) });
+        editor = page.locator('rich-textarea [contenteditable="true"], [role="textbox"][contenteditable="true"]').first();
+        await editor.waitFor({ state: 'visible', timeout: 60_000 });
       }
-      await ensureProjectComposerMode(conn.page, composerMode);
-      return;
-    } finally {
-      if (conn?.browser) {
-        await conn.browser.close().catch(() => {});
+      const oversized = request.snapshot.gitDiff.length > MAX_INLINE_CODE_CHARS || request.snapshot.newFilesContent.length > MAX_INLINE_CODE_CHARS;
+      if (request.mode !== 'plan' && oversized) {
+        if (!isChat) throw new Error('GEMINI_REVIEW_TOO_LARGE: split the task; no truncated advisory is allowed.');
+        const bundle = path.join(os.tmpdir(), 'review_bundle_' + request.requestId + '.txt');
+        try {
+          fs.writeFileSync(bundle, request.snapshot.fullBundleText, { mode: 0o600 });
+          await requireCompleteAttachment(page, bundle);
+        } finally { if (fs.existsSync(bundle)) fs.unlinkSync(bundle); }
       }
-    }
-  }
-
-  // 1. Đọc nội dung file .agents/state/CURRENT_PLAN.md, ROADMAP.md, HANDOFF.md và SESSION_MAP.json
-  if (!fs.existsSync(PLAN_FILE)) {
-    throw new Error(`Không tìm thấy file kế hoạch tại: ${PLAN_FILE}`);
-  }
-  const planContent = fs.readFileSync(PLAN_FILE, 'utf8').trim();
-  if (!planContent) {
-    throw new Error(`File kế hoạch (.agents/state/CURRENT_PLAN.md) đang trống.`);
-  }
-
-  const roadmapContent = readFileSafe(ROADMAP_FILE);
-  const handoffContent = readFileSafe(HANDOFF_FILE);
-  const reviewResponseContent = readFileSafe(REVIEW_RESPONSE_FILE).trim();
-  const sessionMap = loadSessionMap();
-
-  const taskId = resolveCurrentTaskId(
-    taskArg,
-    planContent,
-    roadmapContent,
-    sessionMap
-  );
-  const threadKey = getThreadKey(taskId, mode);
-
-  // Xử lý --reset-rounds (chỉ dành cho người; có ghi vết vào stageRounds[threadKey].resets)
-  if (resetRounds) {
-    const resetList = provider === 'both' ? ['chatgpt', 'gemini'] : [provider];
-    resetStageRounds(sessionMap, threadKey, resetList);
-    saveSessionMap(sessionMap);
-    clearEscalationIfPresent(threadKey);
-    console.log(
-      `[RESET ROUNDS]: Đã đặt lại bộ đếm vòng của "${threadKey}" cho [${resetList.join(', ')}] và xóa khối ESCALATION (nếu có).`
-    );
-    return;
-  }
-
-  let reviewSnapshot = null;
-  if (mode !== 'plan') {
-    reviewSnapshot = collectReviewSnapshot(REPO_ROOT);
-  }
-
-  // Bước 0: Chế độ --dry-run (kiểm chứng toàn bộ quyết định mà KHÔNG chạm Chrome và KHÔNG ghi .agents/state/*)
-  const budgetCheck = checkRoundBudget(
-    sessionMap,
-    threadKey,
-    targetProviders,
-    WORKFLOW_CONFIG.maxReviewRounds,
-    mode
-  );
-  const initialPlans = {};
-  for (const p of targetProviders) {
-    initialPlans[p] = prepareProviderPromptPlan({
-      provider: p,
-      mode,
-      taskId,
-      threadKey,
-      sessionMap,
-      newThread,
-      planContent,
-      roadmapContent,
-      handoffContent,
-      errorSummary,
-      reviewSnapshot,
-      selectedRoles,
-      reviewResponseContent,
-    });
-  }
-
-  if (dryRun) {
-    for (const p of targetProviders) {
-      const plan = initialPlans[p];
-      const outFile = path.join(
-        os.tmpdir(),
-        `dry_run_prompt_${threadKey}_${p}_${Date.now()}_${process.pid}.txt`
-      );
-      fs.writeFileSync(outFile, plan.prompt, 'utf8');
-      console.log(
-        `[DRY-RUN]: provider=${p} | stage=${threadKey} | round=${plan.nextRound}/${plan.maxRounds} (used=${plan.usedRounds}) | thread=${plan.isProviderNewThread ? 'NEW' : 'CONTINUE'} | payload=${plan.decision.kind.toUpperCase()} (${plan.decision.reason}) | chars=${plan.prompt.length} | promptFile=${outFile}`
-      );
-    }
-    if (!budgetCheck.ok) {
-      console.error(
-        `[DRY-RUN][ESCALATION]: Đã hết ngân sách vòng cho [${budgetCheck.exhausted.join(', ')}] ở giai đoạn "${threadKey}". (Exit code ${ESCALATION_EXIT_CODE})`
-      );
-      process.exitCode = ESCALATION_EXIT_CODE;
-      return;
-    }
-    const unchangedProviders = targetProviders.filter(
-      (p) => mode === 'plan' && initialPlans[p].decision.kind === 'unchanged'
-    );
-    if (unchangedProviders.length > 0) {
-      console.error(
-        `[DRY-RUN][UNCHANGED]: CURRENT_PLAN.md không đổi so với snapshot đã gửi cho [${unchangedProviders.join(', ')}]. (Exit code 1)`
-      );
-      process.exitCode = 1;
-      return;
-    }
-    return;
-  }
-
-  // Bước 1 & 5: Kiểm tra ngân sách vòng TRƯỚC Pre-Send Reset (không làm mất STATUS: APPROVED đang có)
-  if (!budgetCheck.ok) {
-    const exhaustedDesc = budgetCheck.details
-      .filter((d) => d.used >= d.max)
-      .map((d) => `${d.provider} (${d.used}/${d.max})`)
-      .join(', ');
-    await recordEscalationAndThrow({
-      taskId,
-      threadKey,
-      mode,
-      reason: `Đã đạt giới hạn vòng review cho giai đoạn "${threadKey}": ${exhaustedDesc}`,
-      targetProviders,
-      sessionMap,
-    });
-  }
-
-  // Bước 4: Chặn gửi lại CURRENT_PLAN.md không thay đổi (TRƯỚC Pre-Send Reset, không đốt vòng)
-  if (mode === 'plan') {
-    const unchanged = targetProviders.filter(
-      (p) => initialPlans[p].decision.kind === 'unchanged'
-    );
-    if (unchanged.length > 0) {
-      throw new Error(
-        `[DELTA REVIEW]: CURRENT_PLAN.md không thay đổi so với lần gửi gần nhất cho [${unchanged.join(', ')}] ở "${threadKey}". Hãy cập nhật kế hoạch trước khi gửi lại (không tốn vòng review).`
-      );
-    }
-  }
-
-  const uniqueBundleName = `review_bundle_${Date.now()}_${process.pid}.txt`;
-  const tempBundlePath = path.join(os.tmpdir(), uniqueBundleName);
-  if (mode !== 'plan' && reviewSnapshot) {
-    fs.writeFileSync(tempBundlePath, reviewSnapshot.fullBundleText, 'utf8');
-  }
-
-  const roleSummary = selectedRoles.map((r) => `${r.key} (${r.name})`).join(', ');
-  for (const p of targetProviders) {
-    const plan = initialPlans[p];
-    console.log(
-      `[PAYLOAD INFO]: Provider="${p}" | Giai đoạn "${threadKey}" (Vòng ${plan.nextRound}/${plan.maxRounds}) | Chế độ gửi: ${plan.decision.kind.toUpperCase()} | Chuyên gia: [${roleSummary}] | Kích thước prompt: ${plan.prompt.length} ký tự.`
-    );
-  }
-
-  // Pre-Send Reset: Vô hiệu hóa trạng thái APPROVED cũ trước khi kết nối Chrome
-  fs.mkdirSync(STATE_DIR, { recursive: true });
-  const currentLock = loadStateLock(REPO_ROOT);
-  if (provider === 'gemini' || provider === 'both') {
-    fs.writeFileSync(
-      GEMINI_FEEDBACK_FILE,
-      `STATUS: PENDING (Task: ${taskId})\n`,
-      'utf8'
-    );
-  }
-  if (provider === 'chatgpt' || provider === 'both') {
-    if (mode === 'review-code') {
-      fs.writeFileSync(
-        CODE_REVIEW_FILE,
-        `CODE_STATUS: PENDING (Task: ${taskId})\n`,
-        'utf8'
-      );
-      saveStateLock(
-        {
-          taskId,
-          planHash: currentLock.planHash || '',
-          codeDiffHash: '',
-          updatedAt: new Date().toISOString(),
-        },
-        REPO_ROOT
-      );
-    } else {
-      fs.writeFileSync(
-        FEEDBACK_FILE,
-        `STATUS: PENDING (Task: ${taskId})\n`,
-        'utf8'
-      );
-      saveStateLock(
-        {
-          taskId,
-          planHash: '',
-          codeDiffHash: '',
-          updatedAt: new Date().toISOString(),
-        },
-        REPO_ROOT
-      );
-    }
-  }
-
-  const runtimeConfig = {
-    ...WORKFLOW_CONFIG,
-    cdpUrl,
-  };
-
-  let chatgptBrowser = null;
-  let geminiBrowser = null;
-  let geminiResult = null;
-
-  try {
-    // 2A. Nếu chạy Gemini (độc lập hoặc chạy trước trong --provider both để lấy Second Opinion)
-    if (provider === 'gemini' || provider === 'both') {
-      try {
-        const geminiConn = await connectProviderPage(
-          'gemini',
-          runtimeConfig,
-          sessionMap,
-          chatgptBrowser
-        );
-        geminiBrowser = geminiConn.browser;
-
-        const geminiExistingEntry = sessionMap.geminiThreads?.[threadKey] || null;
-        const geminiExistingUrl =
-          geminiExistingEntry && typeof geminiExistingEntry.url === 'string'
-            ? geminiExistingEntry.url.trim()
-            : '';
-        const geminiIsNewThread = Boolean(
-          newThread || !extractGeminiConversationId(geminiExistingUrl)
-        );
-        const gemUrl = normalizeGeminiGemUrl(runtimeConfig.geminiGemUrl);
-        if (runtimeConfig.geminiGemUrl && !gemUrl) {
-          console.warn(
-            `[GEMINI GEM]: "geminiGemUrl" trong .agents/config.json không hợp lệ (cần dạng https://gemini.google.com/gem/<id>), bỏ qua.`
-          );
-        }
-
-        const geminiThread = await prepareGeminiThread(geminiConn.page, {
-          existingThreadUrl: geminiExistingUrl,
-          isNewThread: geminiIsNewThread,
-          gemUrl,
-        });
-        const geminiPlan = prepareProviderPromptPlan({
-          provider: 'gemini',
-          mode,
-          taskId,
-          threadKey,
-          sessionMap,
-          newThread,
-          planContent,
-          roadmapContent,
-          handoffContent,
-          errorSummary,
-          reviewSnapshot,
-          selectedRoles,
-          reviewResponseContent,
-          effectiveNewThreadOverride: geminiThread.effectiveNewThread,
-        });
-        let geminiStageRound = geminiPlan.nextRound;
-        console.log(
-          `[GEMINI PAYLOAD]: Giai đoạn "${threadKey}" | ${geminiThread.effectiveNewThread ? 'Luồng MỚI (kèm BOOTSTRAP)' : `Tiếp tục luồng cũ`} | Vòng ${geminiPlan.nextRound}/${geminiPlan.maxRounds} | Payload=${geminiPlan.decision.kind.toUpperCase()}${gemUrl ? ' | Gem: ' + gemUrl : ''} | Kích thước prompt: ${geminiPlan.prompt.length} ký tự.`
-        );
-
-        const geminiResponseText = await askGemini(
-          geminiConn.page,
-          geminiPlan.prompt,
-          sessionMap,
-          {
-            threadKey,
-            taskId,
-            rounds: geminiPlan.nextRound,
-            previousConversationId: geminiThread.previousConversationId,
-            effectiveNewThread: geminiThread.effectiveNewThread,
-            onPromptSubmitted: () => {
-              geminiStageRound = incrementStageRound(
-                sessionMap,
-                threadKey,
-                'gemini'
-              );
-              saveSessionMap(sessionMap);
-              if (mode === 'plan') {
-                writeSnapshot(
-                  snapshotPath(STATE_DIR, threadKey, 'gemini'),
-                  planContent
-                );
-              }
-            },
+      if (request.prompt.length > 200_000) throw new Error('PROMPT_TOO_LARGE: split the task.');
+      await fillPromptFast(editor, request.prompt);
+      if (isChat) {
+        activationVerified = await verifyPluginActivation(editor, options.selectedRoles);
+        if (options.config.requirePlugin && !activationVerified) throw new Error('REQUIRED_PLUGIN_LOST_AFTER_FILL');
+      }
+      const before = isChat ? await getAssistantState(page) : { userCount: await page.locator('user-query').count(), count: await page.locator('model-response').count() };
+      return { url: page.url(), previousUserCount: before.userCount, previousAssistantCount: before.count, activationVerified };
+    },
+    async submit(request) {
+      if (isChat) {
+        activationVerified = await verifyPluginActivation(editor, options.selectedRoles);
+        if (options.config.requirePlugin && !activationVerified) throw new Error('REQUIRED_PLUGIN_LOST_BEFORE_SEND');
+      }
+      const button = page.locator(isChat ? SEND_BUTTON_SELECTOR : 'button[aria-label*="Gửi" i], button[aria-label*="Send" i], button.send-button').first();
+      if (await button.isVisible().catch(() => false)) await button.click();
+      else await editor.press('Enter');
+      const deadline = Date.now() + 20_000;
+      while (Date.now() < deadline && !await hasSubmission(request).catch(() => false)) await sleep(500);
+      if (!await hasSubmission(request)) throw new Error('UNCERTAIN_SEND: no second click is attempted.');
+      const url = isChat ? await waitForConversationUrl(page, prepared.previousConversationId, prepared.effectiveNewThread) : await waitForGeminiConversationUrl(page, prepared.previousConversationId, prepared.effectiveNewThread);
+      return { url, activationVerified };
+    },
+    hasSubmission,
+    async receive(request) {
+      if (!await hasSubmission(request)) throw new Error('LAST_USER_MESSAGE_IS_NOT_THIS_REQUEST');
+      if (isChat) {
+        const response = await waitForStableAssistantResponse(page, request.context.previousUserCount, request.context.previousAssistantCount, 600_000, request.mode);
+        if (!await hasSubmission(request)) throw new Error('CONVERSATION_CHANGED_DURING_REVIEW');
+        return response;
+      }
+      const deadline = Date.now() + 600_000;
+      let last = '', stable = 0;
+      while (Date.now() < deadline) {
+        const busy = await page.locator('button[aria-label*="Dừng"], button[aria-label*="Stop"]').first().isVisible().catch(() => false);
+        const count = await page.locator('model-response').count();
+        const text = count > request.context.previousAssistantCount ? await page.locator('model-response').last().innerText().catch(() => '') : '';
+        if (!busy && text && text === last) {
+          if (++stable >= 3) {
+            if (!await hasSubmission(request)) throw new Error('CONVERSATION_CHANGED_DURING_REVIEW');
+            return text;
           }
-        );
-
-        geminiResult = evaluateAndRecordMentorResponse({
-          provider: 'gemini',
-          mode,
-          threadKey,
-          round: geminiStageRound,
-          responseText: geminiResponseText,
-          positiveTestExitCode: geminiPlan.positiveTestExitCode,
-          url: geminiConn.page.url(),
-        });
-        fs.writeFileSync(
-          GEMINI_FEEDBACK_FILE,
-          geminiResult.normalizedText,
-          'utf8'
-        );
-        console.log(`GEMINI_STATUS: ${geminiResult.status}`);
-
-        if (provider === 'gemini') {
-          if (geminiResult.status === 'APPROVED') {
-            clearEscalationIfPresent(threadKey);
-          } else {
-            const adaptiveGem = evaluateAdaptiveRound({
-              ledger: loadLedger(REVIEW_LEDGER_FILE),
-              sessionMap,
-              threadKey,
-              provider: 'gemini',
-              mode,
-              maxRoundsConfig: WORKFLOW_CONFIG.maxReviewRounds,
-              adaptiveConfig: WORKFLOW_CONFIG.adaptiveRounds,
-            });
-            if (adaptiveGem.extended) {
-              saveSessionMap(sessionMap);
-              console.log(
-                `[ADAPTIVE ROUNDS - GEMINI]: ${adaptiveGem.reason} -> Ngân sách mới: ${adaptiveGem.used}/${adaptiveGem.max}`
-              );
-            } else if (adaptiveGem.shouldEscalate) {
-              await recordEscalationAndThrow({
-                taskId,
-                threadKey,
-                mode,
-                reason:
-                  adaptiveGem.reason ||
-                  `Gemini trả về REJECTED ở vòng cuối cùng (${geminiStageRound}/${geminiPlan.maxRounds}) của "${threadKey}"`,
-                targetProviders: ['gemini'],
-                sessionMap,
-              });
-            }
-          }
-        }
-      } catch (geminiErr) {
-        if (
-          provider === 'both' &&
-          dualPolicy === 'chatgpt-gate' &&
-          !(geminiErr instanceof EscalationError)
-        ) {
-          console.warn(
-            `[GEMINI ADVISORY WARNING]: Gemini gặp lỗi (${geminiErr.message}) — tiếp tục gửi ChatGPT vì dualMentorPolicy="chatgpt-gate".`
-          );
-          geminiResult = { unavailable: true, error: geminiErr.message };
-          fs.writeFileSync(
-            GEMINI_FEEDBACK_FILE,
-            `STATUS: UNAVAILABLE\n\nGemini không phản hồi được ở vòng này: ${geminiErr.message}\n`,
-            'utf8'
-          );
-        } else {
-          throw geminiErr;
-        }
-      }
-    }
-
-    // 2B. Chạy ChatGPT (cổng quyết định chính)
-    if (provider === 'chatgpt' || provider === 'both') {
-      const existingThreadEntry =
-        sessionMap.threads[threadKey] ||
-        (mode === 'plan' ? sessionMap.threads[taskId] : null);
-      const existingThreadUrl =
-        existingThreadEntry && typeof existingThreadEntry.url === 'string'
-          ? existingThreadEntry.url.trim()
-          : '';
-      const isNewThread = Boolean(newThread || !existingThreadUrl);
-
-      const conn = await connectProviderPage(
-        'chatgpt',
-        runtimeConfig,
-        sessionMap,
-        geminiBrowser
-      );
-      chatgptBrowser = conn.browser;
-      const page = conn.page;
-
-      const { previousConversationId, effectiveNewThread } =
-        await prepareTaskThread(page, {
-          existingThreadUrl,
-          isNewThread,
-          projectUrl: sessionMap.projectUrl,
-          model,
-          projectName,
-          sessionMap,
-          composerMode,
-        });
-
-      const secondOpinionBlock =
-        provider === 'both' && mode !== 'rescue'
-          ? buildSecondOpinionBlock(geminiResult)
-          : '';
-      const chatgptPlan = prepareProviderPromptPlan({
-        provider: 'chatgpt',
-        mode,
-        taskId,
-        threadKey,
-        sessionMap,
-        newThread,
-        planContent,
-        roadmapContent,
-        handoffContent,
-        errorSummary,
-        reviewSnapshot,
-        selectedRoles,
-        reviewResponseContent,
-        secondOpinionBlock,
-        effectiveNewThreadOverride: effectiveNewThread,
-      });
-      const reviewPrompt = chatgptPlan.prompt;
-      const positiveTestExitCode = chatgptPlan.positiveTestExitCode;
-
-      const promptTextarea = page.locator(PROMPT_SELECTOR).first();
-      await promptTextarea.waitFor({ state: 'visible', timeout: 60_000 });
-
-      if (composerMode === 'work' && chatgptModel) {
-        await selectChatGptModel(page, chatgptModel);
-      }
-      await setThinkingEffort(page, mode, effortArg);
-
-      const stopLocator = page.locator(STOP_BUTTON_SELECTOR);
-      const waitStopStart = Date.now();
-      while (Date.now() - waitStopStart < 20_000) {
-        if ((await stopLocator.count().catch(() => 0)) === 0) {
-          break;
-        }
+        } else stable = 0;
+        last = text;
         await sleep(1000);
       }
+      throw new Error('INCOMPLETE_GEMINI_RESPONSE');
+    },
+    url: () => page?.url() || '',
+  };
+}
 
-      let { userCount: previousUserCount, count: previousAssistantCount } =
-        await getAssistantState(page);
-
-      if (mode === 'review-code' && reviewSnapshot) {
-        const needsAttachment =
-          reviewSnapshot.gitDiff.length > MAX_INLINE_CODE_CHARS ||
-          reviewSnapshot.newFilesContent.length > MAX_INLINE_CODE_CHARS;
-        if (needsAttachment) {
-          await attachReviewBundle(page, tempBundlePath);
-          await sleep(1000);
-          const stateAfterAttach = await getAssistantState(page);
-          previousUserCount = stateAfterAttach.userCount;
-          previousAssistantCount = stateAfterAttach.count;
-        }
-      }
-
-      await tryInvokeGptMention(page, promptTextarea, selectedRoles);
-      await fillPromptFast(promptTextarea, reviewPrompt);
-      await page.keyboard.press('Space').catch(() => {});
-
-      const sendButton = page.locator(SEND_BUTTON_SELECTOR).first();
-      const isSendVisible = await sendButton
-        .waitFor({ state: 'visible', timeout: 8_000 })
-        .then(() => true)
-        .catch(() => false);
-
-      if (isSendVisible) {
-        await sendButton.click();
-      } else {
-        await promptTextarea.press('Enter');
-      }
-
-      let submittedConfirmed = false;
-      const submitStart = Date.now();
-      while (Date.now() - submitStart < 15_000) {
-        const state = await getAssistantState(page).catch(() => ({
-          userCount: 0,
-        }));
-        const isGeneratingNow =
-          (await stopLocator.count().catch(() => 0)) > 0;
-        const remainingEditorLen = await promptTextarea
-          .evaluate((el) => (el.innerText || '').trim().length)
-          .catch(() => 999);
-        if (
-          state.userCount > previousUserCount ||
-          isGeneratingNow ||
-          remainingEditorLen === 0
-        ) {
-          submittedConfirmed = true;
-          break;
-        }
-        if (await sendButton.isVisible().catch(() => false)) {
-          await sendButton.click().catch(() => {});
-        } else {
-          await promptTextarea.press('Enter').catch(() => {});
-        }
-        await sleep(500);
-      }
-
-      if (!submittedConfirmed) {
-        throw new Error(
-          'Không gửi được prompt trên giao diện ChatGPT sau 15s (nút Gửi chưa kích hoạt hoặc giao diện bị chặn).'
-        );
-      }
-
-      // Tăng bộ đếm stageRounds của ChatGPT ngay khi đã gửi thành công (không phụ thuộc --new-thread)
-      const chatgptStageRound = incrementStageRound(
-        sessionMap,
-        threadKey,
-        'chatgpt'
-      );
-      if (mode === 'plan') {
-        writeSnapshot(
-          snapshotPath(STATE_DIR, threadKey, 'chatgpt'),
-          planContent
-        );
-      }
-
-      const activeThreadUrl = await waitForConversationUrl(
-        page,
-        previousConversationId,
-        effectiveNewThread
-      );
-      sessionMap.currentTask = taskId;
-      if (CONVERSATION_URL_REGEX.test(activeThreadUrl)) {
-        sessionMap.threads[threadKey] = {
-          url: activeThreadUrl,
-          rounds: chatgptStageRound,
-          updatedAt: new Date().toISOString(),
-        };
-        sessionMap.threads[taskId] = {
-          url: activeThreadUrl,
-          rounds: chatgptStageRound,
-          updatedAt: new Date().toISOString(),
-        };
-      }
-      saveSessionMap(sessionMap);
-      if (CONVERSATION_URL_REGEX.test(activeThreadUrl)) {
-        console.log(
-          `[SESSION_MAP]: Đã lưu URL luồng ChatGPT vào "${taskId}" và "${threadKey}" (stageRound=${chatgptStageRound}/${chatgptPlan.maxRounds}): ${activeThreadUrl}`
-        );
-      }
-
-      const responseText = await waitForStableAssistantResponse(
-        page,
-        previousUserCount,
-        previousAssistantCount,
-        600_000,
-        mode
-      );
-
-      const finalUrl = page.url();
-      sessionMap.currentTask = taskId;
-      if (CONVERSATION_URL_REGEX.test(finalUrl)) {
-        sessionMap.threads[threadKey] = {
-          url: finalUrl,
-          rounds: chatgptStageRound,
-          updatedAt: new Date().toISOString(),
-        };
-        sessionMap.threads[taskId] = {
-          url: finalUrl,
-          rounds: chatgptStageRound,
-          updatedAt: new Date().toISOString(),
-        };
-        saveSessionMap(sessionMap);
-      }
-
-      fs.mkdirSync(STATE_DIR, { recursive: true });
-      const chatgptEval = evaluateAndRecordMentorResponse({
-        provider: 'chatgpt',
-        mode,
-        threadKey,
-        round: chatgptStageRound,
-        responseText,
-        positiveTestExitCode,
-        url: finalUrl,
-      });
-
-      let finalStatus = chatgptEval.status;
-      let advisorySuffix = '';
-      if (provider === 'both' && mode !== 'rescue') {
-        const dual = combineDualStatus(
-          chatgptEval.status,
-          geminiResult,
-          dualPolicy
-        );
-        finalStatus = dual.finalStatus;
-        advisorySuffix = renderAdvisorySection(geminiResult, dualPolicy);
-        console.log(
-          `[DUAL MENTOR]: ChatGPT=${chatgptEval.status} | Gemini=${dual.geminiStatus} -> ${dual.consensus} (policy=${dualPolicy}, final=${finalStatus})`
-        );
-      }
-
-      if (mode === 'review-code') {
-        const outputText =
-          normalizeMentorFeedback(responseText, finalStatus, 'review-code') +
-          advisorySuffix;
-        fs.writeFileSync(CODE_REVIEW_FILE, outputText, 'utf8');
-        if (finalStatus === 'APPROVED') {
-          const latestLock = loadStateLock(REPO_ROOT);
-          saveStateLock(
-            {
-              taskId,
-              planHash: latestLock.planHash || computePlanHash(REPO_ROOT),
-              codeDiffHash: computeCodeDiffHash(REPO_ROOT, REVIEW_SCOPE),
-              updatedAt: new Date().toISOString(),
-            },
-            REPO_ROOT
-          );
-          clearEscalationIfPresent(threadKey);
-        }
-        console.log(`CODE_STATUS: ${finalStatus}`);
-      } else if (mode === 'rescue') {
-        fs.writeFileSync(FEEDBACK_FILE, chatgptEval.normalizedText, 'utf8');
-        console.log('RESCUE_GUIDANCE_SAVED');
-      } else {
-        const outputText =
-          normalizeMentorFeedback(responseText, finalStatus, 'plan') +
-          advisorySuffix;
-        fs.writeFileSync(FEEDBACK_FILE, outputText, 'utf8');
-        if (finalStatus === 'APPROVED') {
-          saveStateLock(
-            {
-              taskId,
-              planHash: computePlanHash(REPO_ROOT),
-              codeDiffHash: '',
-              updatedAt: new Date().toISOString(),
-            },
-            REPO_ROOT
-          );
-          clearEscalationIfPresent(threadKey);
-        }
-        console.log(`STATUS: ${finalStatus}`);
-      }
-
-      if (finalStatus === 'APPROVED') {
-        await sendWorkflowNotification({
-          repoRoot: REPO_ROOT,
-          eventType: mode === 'review-code' ? 'code-approved' : 'plan-approved',
-          text: `✅ [${DEFAULT_PROJECT_NAME}] ${taskId} (${threadKey}): Đã được Mentor duyệt (${mode === 'review-code' ? 'CODE_STATUS: APPROVED' : 'STATUS: APPROVED'}) ở vòng ${chatgptStageRound}!`,
-        }).catch(() => {});
-      } else if (finalStatus === 'REJECTED') {
-        const adaptiveGpt = evaluateAdaptiveRound({
-          ledger: loadLedger(REVIEW_LEDGER_FILE),
-          sessionMap,
-          threadKey,
-          provider: 'chatgpt',
-          mode,
-          maxRoundsConfig: WORKFLOW_CONFIG.maxReviewRounds,
-          adaptiveConfig: WORKFLOW_CONFIG.adaptiveRounds,
-        });
-        if (adaptiveGpt.extended) {
-          saveSessionMap(sessionMap);
-          console.log(
-            `[ADAPTIVE ROUNDS - CHATGPT]: ${adaptiveGpt.reason} -> Ngân sách mới: ${adaptiveGpt.used}/${adaptiveGpt.max}`
-          );
-        } else if (adaptiveGpt.shouldEscalate) {
-          await recordEscalationAndThrow({
-            taskId,
-            threadKey,
-            mode,
-            reason:
-              mode === 'rescue'
-                ? `Đã dùng hết ${chatgptStageRound}/${adaptiveGpt.max} lượt RESCUE (Circuit Breaker) cho "${threadKey}"`
-                : adaptiveGpt.reason ||
-                  `ChatGPT trả về REJECTED ở vòng cuối cùng (${chatgptStageRound}/${adaptiveGpt.max}) của "${threadKey}"`,
-            targetProviders,
-            sessionMap,
-          });
-        }
-      }
+async function main() {
+  const options = parseArgs(process.argv.slice(2));
+  const { mode, provider, taskArg, dryRun, resetRounds, ensureProject, newThread, roleArg, errorSummary } = options;
+  const config = { ...WORKFLOW_CONFIG, cdpUrl: options.cdpUrl };
+  options.model = options.model || config.chatgptModel || '';
+  const providers = provider === 'both' ? ['gemini', 'chatgpt'] : [provider];
+  const connections = [];
+  const run = async () => {
+    if (hasPendingTransaction(REPO_ROOT)) throw new Error('STATE_RECOVERY_REQUIRED: inspect owner, then doctor --recover-state.');
+    if (ensureProject) {
+      if (dryRun) { console.log('[DRY-RUN] ensure-project: no changes.'); return; }
+      const session = loadSessionMap();
+      const conn = await connectProviderPage('chatgpt', config, session);
+      connections.push(conn.browser);
+      await ensureProjectUrl(conn.page, session, options.projectName || DEFAULT_PROJECT_NAME);
+      return;
     }
-  } finally {
-    if (fs.existsSync(tempBundlePath)) {
+    const planContent = fs.readFileSync(PLAN_FILE, 'utf8').trim();
+    if (!planContent) throw new Error('EMPTY_PLAN');
+    let sessionMap = loadSessionMap();
+    const taskId = resolveCurrentTaskId(taskArg, planContent, readFileSafe(ROADMAP_FILE), sessionMap);
+    const threadKey = getThreadKey(taskId, mode);
+    if (resetRounds) {
+      if (dryRun) { console.log('[DRY-RUN] reset-rounds: no changes.'); return; }
+      if (!process.argv.includes('--confirm-reset=' + taskId)) throw new Error('RESET_REQUIRES_EXPLICIT_CONFIRMATION: --confirm-reset=' + taskId);
+      if (providers.some((p) => pendingRequest(loadRequest(REPO_ROOT, p, threadKey)))) throw new Error('CANNOT_RESET_PENDING_REQUEST');
+      resetStageRounds(sessionMap, threadKey, providers); saveSessionMap(sessionMap); clearEscalationIfPresent(threadKey);
+      return;
+    }
+    let geminiResult = null;
+    const selectedRoles = resolveSpecialistRoles(roleArg, mode);
+    const dualPolicy = resolveDualMentorPolicy(config.dualMentorPolicy);
+    const otherPending = providers.some((p) => pendingRequest(loadRequest(REPO_ROOT, p, threadKey)));
+    for (const p of providers) {
+      let request = loadRequest(REPO_ROOT, p, threadKey);
+      const resume = pendingRequest(request);
+      if (resume && newThread) throw new Error('PENDING_REQUEST_CANNOT_CHANGE_THREAD');
+      if (otherPending && p === 'gemini' && request.status === 'VALIDATED' && request.evaluation) {
+        assertBindingCurrent(REPO_ROOT, loadWorkflowConfig(REPO_ROOT), request.binding);
+        geminiResult = request.evaluation; continue;
+      }
+      const snapshot = resume ? request.snapshot : collectReviewSnapshot(REPO_ROOT, taskId, mode, !dryRun && mode !== 'plan');
+      if (resume) assertPendingBindingCurrent(REPO_ROOT, loadWorkflowConfig(REPO_ROOT), request);
+      else assertBindingCurrent(REPO_ROOT, loadWorkflowConfig(REPO_ROOT), snapshot.binding);
+      sessionMap = loadSessionMap();
+      const promptPlan = prepareProviderPromptPlan({ provider: p, mode, taskId, threadKey, sessionMap, newThread, planContent, roadmapContent: readFileSafe(ROADMAP_FILE), handoffContent: readFileSafe(HANDOFF_FILE), errorSummary, reviewSnapshot: snapshot, selectedRoles, reviewResponseContent: readFileSafe(REVIEW_RESPONSE_FILE), secondOpinionBlock: p === 'chatgpt' && geminiResult ? buildSecondOpinionBlock(geminiResult) : '' });
+      if (dryRun) {
+        console.log('[DRY-RUN]: provider=' + p + ' | stage=' + threadKey + ' | round=' + (resume ? request.round : promptPlan.nextRound) + '/' + promptPlan.maxRounds + ' | payload=' + promptPlan.decision.kind + ' | pending=' + resume);
+        continue;
+      }
+      if (!resume && promptPlan.decision.kind === 'unchanged') throw new Error('UNCHANGED_PLAN: revise plan after a completed review.');
+      if (!resume && !checkRoundBudget(sessionMap, threadKey, [p], config.maxReviewRounds, mode).ok) await recordEscalationAndThrow({ taskId, threadKey, mode, reason: 'Review budget exhausted', targetProviders: [p], sessionMap });
+      if (!resume && p === 'chatgpt') {
+        invalidateApproval(REPO_ROOT, mode, taskId);
+        writeAtomic(mode === 'review-code' ? CODE_REVIEW_FILE : FEEDBACK_FILE, (mode === 'review-code' ? 'CODE_STATUS' : 'STATUS') + ': PENDING\n');
+      }
+      const transport = createBrowserTransport(p, { ...options, config, selectedRoles, composerMode: resolveComposerMode(options.composerArg, config, options.model) }, connections);
       try {
-        fs.unlinkSync(tempBundlePath);
-      } catch (_e) {}
+        request = await executeReviewRequest({ root: REPO_ROOT, config: loadWorkflowConfig(REPO_ROOT), taskId, mode, provider: p, threadKey, snapshot, openIssues: promptPlan.openIssues, buildPrompt: () => promptPlan.prompt, transport });
+        if (mode !== 'rescue') {
+          const ledger = loadLedger(REVIEW_LEDGER_FILE);
+          try { validateRequestResponse(request.responseText, request, ledger); }
+          catch (e) { transitionRequest(REPO_ROOT, request, 'ERROR', { errorCode: e.message.split(':')[0] }); throw e; }
+        }
+        // I/O failures while recording a valid response leave RECEIVED resumable.
+        const evaluation = evaluateAndRecordMentorResponse({ provider: p, mode, threadKey, round: request.round, responseText: request.responseText, positiveTestExitCode: request.snapshot.positiveTestExitCode, url: request.responseUrl, request });
+        let finalStatus = evaluation.status;
+        if (p === 'chatgpt' && provider === 'both' && mode !== 'rescue') finalStatus = combineDualStatus(evaluation.status, geminiResult, dualPolicy).finalStatus;
+        assertBindingCurrent(REPO_ROOT, loadWorkflowConfig(REPO_ROOT), request.binding);
+        if (p === 'chatgpt' && finalStatus === 'APPROVED' && mode !== 'rescue') publishApproval(REPO_ROOT, request.binding, { requestId: request.requestId, provider: p, testExitCode: request.snapshot.positiveTestExitCode, testEvidenceHash: request.snapshot.testEvidenceHash });
+        const feedback = normalizeMentorFeedback(request.responseText, finalStatus, mode) + (p === 'chatgpt' && geminiResult ? renderAdvisorySection(geminiResult, dualPolicy) : '');
+        writeAtomic(p === 'gemini' ? GEMINI_FEEDBACK_FILE : mode === 'review-code' ? CODE_REVIEW_FILE : FEEDBACK_FILE, feedback);
+        sessionMap = loadSessionMap(); sessionMap.currentTask = taskId;
+        if (request.responseUrl) (p === 'chatgpt' ? sessionMap.threads : sessionMap.geminiThreads)[threadKey] = { url: request.responseUrl, rounds: request.round, updatedAt: new Date().toISOString() };
+        saveSessionMap(sessionMap);
+        if (mode === 'plan') writeSnapshot(snapshotPath(STATE_DIR, threadKey, p), request.snapshot.planContent);
+        // Mark terminal only after durable bookkeeping. Replaying RECEIVED is idempotent.
+        request = transitionRequest(REPO_ROOT, request, 'VALIDATED', { evaluation: { ...evaluation, status: finalStatus } });
+        recordMetric(REPO_ROOT, { requestId: request.requestId, taskId, provider: p, mode, event: 'validated', status: finalStatus, round: request.round, durationMs: Date.now() - Date.parse(request.createdAt), activationVerified: request.context?.activationVerified || false });
+        console.log((p === 'gemini' ? 'GEMINI_STATUS' : mode === 'review-code' ? 'CODE_STATUS' : 'STATUS') + ': ' + finalStatus);
+        if (p === 'gemini') geminiResult = evaluation;
+        if (finalStatus === 'APPROVED') clearEscalationIfPresent(threadKey);
+        else {
+          const adaptive = evaluateAdaptiveRound({ ledger: loadLedger(REVIEW_LEDGER_FILE), sessionMap, threadKey, provider: p, mode, maxRoundsConfig: config.maxReviewRounds, adaptiveConfig: config.adaptiveRounds });
+          if (adaptive.extended) saveSessionMap(sessionMap);
+          if (adaptive.shouldEscalate && (p === 'chatgpt' || provider === 'gemini')) await recordEscalationAndThrow({ taskId, threadKey, mode, reason: adaptive.reason || 'Review rejected at limit', targetProviders: [p], sessionMap });
+        }
+        if (p === 'chatgpt' && finalStatus === 'APPROVED' && !request.notificationAttemptedAt) {
+          request.notificationAttemptedAt = new Date().toISOString(); saveRequest(REPO_ROOT, request);
+          await sendWorkflowNotification({ repoRoot: REPO_ROOT, eventType: mode === 'review-code' ? 'code-approved' : 'plan-approved', text: taskId + ': ' + finalStatus }).catch(() => {});
+        }
+      } catch (e) {
+        if (p === 'gemini' && provider === 'both' && dualPolicy === 'chatgpt-gate' && !(e instanceof EscalationError)) { geminiResult = { unavailable: true, error: e.message.split(':')[0] }; console.warn('[GEMINI ADVISORY UNAVAILABLE]: ' + geminiResult.error); }
+        else throw e;
+      }
     }
-    if (geminiBrowser && geminiBrowser !== chatgptBrowser) {
-      await geminiBrowser.close().catch(() => {});
-    }
-    if (chatgptBrowser) {
-      await chatgptBrowser.close().catch(() => {});
-    }
+  };
+  try {
+    if (dryRun) await run();
+    else await withRunnerLease(REPO_ROOT, providers.map((p) => p === 'chatgpt' ? config.cdpUrl : config.geminiCdpUrl), run);
+  } finally {
+    for (const browser of [...new Set(connections)].reverse()) await browser.close().catch(() => {});
   }
 }
 

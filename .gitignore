@@ -1,4 +1,13 @@
 node_modules/
+.agents/state/.workflow-*.lock
+.agents/state/requests/
+.agents/state/METRICS.jsonl
+.agents/state/TELEGRAM_CURSOR.json
+.agents/state/TELEGRAM_INBOX.json
+.agents/state/HUB_ACTIVE.lock
+.agents/state/media/
+.agents/state/CHECKPOINT_LATEST.json
+.agents/state/.restore_pending.json
 .env
 .env.*
 !.env.example

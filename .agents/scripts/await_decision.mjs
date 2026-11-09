@@ -8,6 +8,7 @@
 //   14 = Dừng Task
 //   15 = Hết thời gian chờ (Timeout)
 import process from 'node:process';
+import { withRunnerLease } from './workflow_state.mjs';
 import {
   REPO_ROOT,
   DECISION_EXIT_CODES,
@@ -39,10 +40,11 @@ async function main() {
       taskId ? ` cho "${taskId}"` : ''
     }...`
   );
-  const record = await waitForTelegramDecision({
+  const record = await withRunnerLease(REPO_ROOT, [], () => waitForTelegramDecision({
     repoRoot: REPO_ROOT,
     timeoutMs,
-  });
+    expectedTaskId: taskId,
+  }));
   console.log(`[DECISION RECEIVED]: action=${record.action} | exitCode=${record.exitCode}`);
   console.log(`[SUMMARY]: ${record.summaryNote}`);
   process.exit(record.exitCode ?? DECISION_EXIT_CODES.EXTEND);

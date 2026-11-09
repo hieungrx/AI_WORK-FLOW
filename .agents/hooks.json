@@ -2,11 +2,11 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "write_file|edit_file|replace_file_content|multi_replace_file_content|Write|Edit|MultiEdit",
+        "matcher": "write_to_file|write_file|edit_file|replace_file_content|multi_replace_file_content|Write|Edit|MultiEdit|run_command|Bash|exec_command",
         "hooks": [
           {
             "type": "command",
-            "command": "bash ./scripts/check_plan_approved.sh"
+            "command": "node .agents/scripts/check_plan_approved.mjs"
           }
         ]
       }

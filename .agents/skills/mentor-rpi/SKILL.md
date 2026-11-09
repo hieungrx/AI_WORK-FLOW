@@ -95,3 +95,11 @@ Trước khi dừng phiên làm việc (do chờ Mentor duyệt, hoàn thành Ta
    - Bước hiện tại trong quy trình RPIR (`Research & Plan`, `Waiting for Mentor Approval`, `Implementing`, `Code Review`, hoặc `Implemented & Verified`).
    - Tóm tắt những thay đổi đã thực hiện và danh sách Technical Debt (nếu có).
    - Hướng dẫn rõ ràng hành động tiếp theo cho Agent/phiên kế tiếp.
+
+
+---
+
+## Bước 7: Điều khiển Từ xa Thời gian thực qua Telegram & Reactive Wakeup (Tùy chọn khi có `.env` Telegram)
+1. Nếu `.env` có `TELEGRAM_BOT_TOKEN` và `TELEGRAM_CHAT_ID`, đảm bảo `node .agents/scripts/telegram_daemon.mjs --no-banner` (`IsDaemon: true`) và `node .agents/scripts/wakeup_watcher.mjs` (`IsDaemon: false`, `WaitMsBeforeAsync: 500`) đang chạy nền.
+2. Khi `wakeup_watcher.mjs` thoát với `exitCode = 0`, kiểm tra nội dung lệnh mới trong `.agents/state/TELEGRAM_INBOX.json` (nếu có `localFilePath` `.ogg`, đọc trực tiếp file âm thanh để nghe yêu cầu của người dùng).
+3. Thực thi yêu cầu, gửi phản hồi về Telegram bằng `node .agents/scripts/send_reply.mjs "<câu trả lời>"` và khởi chạy lại `node .agents/scripts/wakeup_watcher.mjs` để tiếp tục trực chiến 24/7.

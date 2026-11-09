@@ -6,6 +6,9 @@
   "scripts": {
     "test": "node .agents/scripts/run_tests.mjs",
     "test:workflow": "node .agents/tests/review_policy.test.mjs",
+    "test:hardening": "node --test .agents/tests/hardening.test.mjs",
+    "test:all": "node .agents/scripts/run_all_tests.mjs",
+    "doctor": "node .agents/scripts/doctor.mjs",
     "ask-mentor": "node .agents/scripts/ask_mentor.mjs",
     "ask-gemini": "node .agents/scripts/ask_mentor.mjs --provider gemini",
     "ask-both": "node .agents/scripts/ask_mentor.mjs --provider both",
@@ -13,6 +16,9 @@
     "init-workflow": "node .agents/scripts/init_project.mjs",
     "checkpoint": "node .agents/scripts/checkpoint.mjs",
     "telegram-setup": "node .agents/scripts/telegram_setup.mjs",
+    "telegram-daemon": "node .agents/scripts/telegram_daemon.mjs",
+    "telegram-watch": "node .agents/scripts/wakeup_watcher.mjs",
+    "telegram-reply": "node .agents/scripts/send_reply.mjs",
     "await-decision": "node .agents/scripts/await_decision.mjs"
   },
   "keywords": [],

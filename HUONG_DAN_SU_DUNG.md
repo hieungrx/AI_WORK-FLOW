@@ -231,6 +231,9 @@ Trong ChatGPT Project có 2 chế độ khung nhập liệu, bạn có thể ch�
 | **Gọi cứu hộ khi sửa lỗi thất bại quá 3 lần liên tiếp** | `node .agents/scripts/ask_mentor.mjs --mode rescue --task task-1 --error "Mô tả lỗi"` |
 | **Chụp nhanh trạng thái (Snapshot) trước khi đổi tài khoản Antigravity** | `npm run checkpoint -- --note "Đang làm dở phần X"` |
 | **Kết nối Bot Telegram thông báo & quyết định 2 chiều** | `npm run telegram-setup` |
+| **Khởi chạy Telegram Real-time Daemon 24/7 (< 0.5s)** | `npm run telegram-daemon` (hoặc mở `start-telegram-daemon.bat`) |
+| **Bật cầu nối Reactive Wakeup tự đánh thức Agent khi có tin nhắn/voice** | `npm run telegram-watch` |
+| **Gửi câu trả lời trực tiếp từ Agent về Telegram kèm bàn phím điều khiển** | `npm run telegram-reply -- "Nội dung phản hồi"` |
 | **Chờ bạn bấm nút quyết định trên Telegram khi xảy ra Escalation** | `npm run await-decision` |
 
 ---
@@ -282,3 +285,22 @@ Ten-Du-An-Moi/
 2. Mở tài khoản Antigravity mới (hoặc chạy `start-system.bat --multi-account`), mở lại đúng thư mục dự án và nhắn:
    > *"Đọc `.agents/state/HANDOFF.md` và tiếp tục công việc."*
    Tài khoản mới sẽ nắm bắt 100% tiến độ, mã Task và luồng chat ChatGPT đang mở mà không cần giải thích lại từ đầu!
+
+
+---
+
+## 📱 8. Điều khiển Dự án Từ xa 24/7 qua Telegram (Real-time Daemon & Reactive Wakeup v3.0)
+
+Từ phiên bản v3.0, bạn có thể ra lệnh bằng chữ hoặc giọng nói (Voice Note `.ogg`), xem trạng thái, chạy kiểm thử, lưu Checkpoint, tạo phiên chat mới và chuyển đổi giữa nhiều dự án ngay trên điện thoại với tốc độ phản hồi **< 0.5 giây** mà không cần ngồi trước máy tính:
+
+1. **Thiết lập lần đầu**: Chạy `npm run telegram-setup` để kết nối Bot Telegram và lưu `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` vào `.env`.
+2. **Bật chế độ trực chiến 24/7**:
+   - Nhắn cho Antigravity: *"Hãy bật Telegram Real-time Daemon và Reactive Wakeup"* (hoặc chạy `start-telegram-daemon.bat`).
+   - Hệ thống sẽ chạy nền `telegram_daemon.mjs` kết hợp với cầu nối đánh thức `wakeup_watcher.mjs`.
+3. **Các nút bấm & lệnh điều khiển trên Telegram**:
+   - `📊 Trạng thái` (`/status`), `🗺️ Roadmap` (`/roadmap`), `🧪 Chạy Test` (`/test`).
+   - `✅ Duyệt Gate (Override)` (`/approve`), `⏩ Gia hạn +2 vòng` (`/extend`).
+   - `📸 Lưu Checkpoint` (`/checkpoint`): Tự động chạy `checkpoint.mjs` chốt `HANDOFF.md` từ xa.
+   - `🆕 Tạo Phiên Mới` (`/newchat`): Tự động lưu Checkpoint và gọi Antigravity CLI (`agy --mode auto -p "..."`) khởi tạo một phiên hội thoại mới sạch sẽ khi phiên cũ quá dài.
+   - `📂 Đổi dự án` (`/projects`) & `🖥️ Mở trên Antigravity IDE`: Chuyển đổi dự án đang điều khiển từ xa và mở dự án trên giao diện Antigravity IDE.
+   - **Gửi tin nhắn chữ hoặc Ghi âm (Voice Note)**: Tự động tải file `.ogg` về `.agents/state/media/`, kích hoạt `wakeup_watcher.mjs` đánh thức AI Agent dậy nghe trực tiếp, thực thi yêu cầu và trả lời lại về Telegram qua `npm run telegram-reply -- "<nội dung>"`.

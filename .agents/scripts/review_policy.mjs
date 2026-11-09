@@ -6,6 +6,7 @@
 //   5. Escalation — khối ESCALATION trong HANDOFF.md + exit code 3 khi hết vòng.
 //   6. Chuẩn hóa phản hồi Gemini + chính sách 2 Mentor (ChatGPT quyết định, Gemini góp ý).
 import fs from 'node:fs';
+import { readJson, writeJson, writeAtomic } from './workflow_state.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import childProcess from 'node:child_process';
@@ -16,7 +17,7 @@ import {
   summarizeTechDebt,
   parseTechDebtFile,
   buildTechDebtFingerprint,
-} from '../../src/tech_debt.mjs';
+} from './tech_debt.mjs';
 
 export {
   appendTechDebt,
@@ -424,13 +425,15 @@ function classifyHeader(cleanLine) {
 export function parseSeverityReport(text) {
   const report = { structured: false, p0: [], p1: [], p2: [], statuses: {} };
   let section = null;
+  const headers = new Set();
   for (const rawLine of normalizeNewlines(text).split('\n')) {
     const clean = stripDecorations(rawLine);
     if (!clean) continue;
     const header = classifyHeader(clean);
     if (header) {
       section = header;
-      if (header === 'blocking' || header === 'nonblocking') report.structured = true;
+      headers.add(header);
+      report.structured = headers.has('blocking') && headers.has('nonblocking');
       continue;
     }
     const m = clean.match(ITEM_REGEX);
@@ -457,14 +460,14 @@ export function parseSeverityReport(text) {
  * Áp luật Severity Gate lên trạng thái Mentor trả về (fail-closed).
  * - APPROVED nhưng còn P0 -> ép REJECTED.
  * - REJECTED nhưng không có P0 -> giữ REJECTED, cảnh báo REJECT_WITHOUT_P0.
- * - Không có cấu trúc BLOCKING/NON-BLOCKING -> giữ nguyên, cảnh báo FORMAT_MISSING.
+ * - Thiếu cấu trúc BLOCKING/NON-BLOCKING -> REJECTED, cảnh báo FORMAT_MISSING.
  */
 export function applySeverityGate(status, report) {
   const warnings = [];
   let finalStatus = status === 'APPROVED' ? 'APPROVED' : 'REJECTED';
   if (!report?.structured) {
     warnings.push('FORMAT_MISSING');
-    return { status: finalStatus, warnings };
+    return { status: 'REJECTED', warnings };
   }
   if (finalStatus === 'APPROVED' && report.p0.length > 0) {
     finalStatus = 'REJECTED';
@@ -486,31 +489,28 @@ export const WARNING_TEXT = Object.freeze({
     'Mentor nêu P0 mới không có tiền tố NEW- (vi phạm quy tắc hội tụ) -> giữ trạng thái, người cần xem lại.',
 });
 
-// Đã chuyển cài đặt appendTechDebt sang src/tech_debt.mjs và re-export ở đầu file.
+// Runtime tech-debt nằm cùng scripts để có thể đưa workflow vào dự án có sẵn.
 
 // ---------------------------------------------------------------------------
 // 3. Ledger & quy tắc hội tụ
 // ---------------------------------------------------------------------------
 
 export function loadLedger(filePath) {
-  try {
-    if (fs.existsSync(filePath)) {
-      const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed;
-    }
-  } catch (_e) {}
-  return {};
+  return readJson(filePath, { missing: {} });
 }
-
 export function saveLedger(filePath, ledger) {
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, `${JSON.stringify(ledger, null, 2)}\n`, 'utf8');
+  writeJson(filePath, ledger);
 }
 
 export function appendLedgerRound(ledger, threadKey, provider, entry) {
   ledger[threadKey] = ledger[threadKey] || {};
   ledger[threadKey][provider] = Array.isArray(ledger[threadKey][provider]) ? ledger[threadKey][provider] : [];
-  ledger[threadKey][provider].push(entry);
+  if (entry.requestId && ledger[threadKey][provider].some((r) => r.requestId === entry.requestId)) return ledger;
+  const open = getOpenIssues(ledger, threadKey, provider);
+  const nextOpen = new Map(open.map((issue) => [issue.id, issue]));
+  for (const [id, status] of Object.entries(entry.statuses || {})) if (status === 'RESOLVED') nextOpen.delete(id);
+  for (const issue of entry.p0 || []) nextOpen.set(issue.id, issue);
+  ledger[threadKey][provider].push({ ...entry, p0: [...nextOpen.values()] });
   return ledger;
 }
 
@@ -519,7 +519,7 @@ export function getLastLedgerRound(ledger, threadKey, provider) {
   return Array.isArray(rounds) && rounds.length > 0 ? rounds[rounds.length - 1] : null;
 }
 
-/** P0 còn mở = danh sách P0 của vòng gần nhất (Mentor chỉ liệt kê P0 còn mở trong mục BLOCKING). */
+/** Vòng cuối lưu toàn bộ P0 chưa được đóng rõ ràng, kể cả ID bị phản hồi mới bỏ sót. */
 export function getOpenIssues(ledger, threadKey, provider) {
   const last = getLastLedgerRound(ledger, threadKey, provider);
   return last && Array.isArray(last.p0) ? last.p0 : [];
@@ -545,9 +545,10 @@ export function buildConvergenceBlock(openIssues, round) {
 
 /** P0 mới (không có trong danh sách mở, không có tiền tố NEW-) ở vòng >= 2. */
 export function detectConvergenceViolations(report, openIssues, round) {
-  if (round < 2 || !report?.structured) return [];
+  if (round < 2 || (!report?.structured && !(Array.isArray(report?.p0) && report.p0.length > 0))) return [];
   const openIds = new Set((openIssues || []).map((i) => i.id));
-  return report.p0.filter((i) => !i.isNew && !openIds.has(i.id));
+  const missing = (openIssues || []).filter((i) => !['RESOLVED', 'STILL_OPEN'].includes(report.statuses?.[i.id])).map((i) => ({ ...i, missingStatus: true }));
+  return [...report.p0.filter((i) => !i.isNew && !openIds.has(i.id)), ...missing];
 }
 
 // ---------------------------------------------------------------------------
@@ -569,7 +570,7 @@ export function readSnapshot(filePath) {
 
 export function writeSnapshot(filePath, content) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, normalizeNewlines(content), 'utf8');
+  writeAtomic(filePath, normalizeNewlines(content));
 }
 
 export function isSameContent(a, b) {

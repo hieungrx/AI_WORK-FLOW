@@ -12,6 +12,7 @@ const TEST_FILE_REGEX = /\.(?:test|spec)\.(?:c|m)?js$/i;
 
 function collectTestFiles(dirPath) {
   if (!fs.existsSync(dirPath)) return [];
+  if (fs.statSync(dirPath).isFile()) return TEST_FILE_REGEX.test(dirPath) ? [dirPath] : [];
   const results = [];
   for (const entry of fs.readdirSync(dirPath, { withFileTypes: true })) {
     const fullPath = path.join(dirPath, entry.name);
@@ -35,11 +36,11 @@ for (const relDir of sourceDirs) {
 }
 
 if (testFiles.length === 0) {
-  console.log('[TEST]: Chưa có file kiểm thử (*.test.js / *.spec.js) trong src/ hoặc tests/ — PASS khởi tạo.');
-  process.exit(0);
+  console.log('WORKFLOW_NO_TESTS: Chưa có kiểm thử ứng dụng; chưa đủ bằng chứng để duyệt code.');
+  process.exit(1);
 }
 
-const res = childProcess.spawnSync(process.execPath, ['--test', ...testFiles], {
+const res = childProcess.spawnSync(process.execPath, ['--test', ...new Set(testFiles)], {
   cwd: REPO_ROOT,
   stdio: 'inherit',
 });
